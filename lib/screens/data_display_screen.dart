@@ -390,12 +390,7 @@ class _DataDisplayScreenState extends State<DataDisplayScreen>
                           !isActuallyConnected
                               ? null
                               : () {
-                                // Call provider to send command
-                                context
-                                    .read<Esp32Provider>()
-                                    .sendClearCredentialsCommand();
-
-                                // Show feedback
+                                // Show feedback immediately
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                     content: Text(
@@ -405,15 +400,26 @@ class _DataDisplayScreenState extends State<DataDisplayScreen>
                                   ),
                                 );
 
-                                // <<< WORKING IMPLEMENTATION: Navigate from UI after delay >>>
-                                Future.delayed(const Duration(seconds: 1), () {
-                                  if (mounted) {
-                                    // Ensure widget is still mounted
-                                    Navigator.pushReplacementNamed(
-                                      context,
-                                      '/provision',
-                                    );
-                                  }
+                                // Use microtask to prevent UI blocking
+                                Future.microtask(() {
+                                  // Call provider to send command asynchronously
+                                  context
+                                      .read<Esp32Provider>()
+                                      .sendClearCredentialsCommand();
+
+                                  // Navigate after a reasonable delay to allow disconnect to complete
+                                  Future.delayed(
+                                    const Duration(seconds: 1),
+                                    () {
+                                      if (mounted) {
+                                        // Ensure widget is still mounted
+                                        Navigator.pushReplacementNamed(
+                                          context,
+                                          '/provision',
+                                        );
+                                      }
+                                    },
+                                  );
                                 });
                               },
                       style: ElevatedButton.styleFrom(
@@ -454,22 +460,6 @@ class _DataDisplayScreenState extends State<DataDisplayScreen>
               child: Padding(padding: const EdgeInsets.all(16.0), child: child),
             ),
           ),
-        );
-      },
-      child: child,
-    );
-  }
-
-  Widget _buildAnimatedContainer({
-    required Widget child,
-    Duration duration = const Duration(milliseconds: 400),
-  }) {
-    return AnimatedBuilder(
-      animation: _animationController,
-      builder: (context, child) {
-        return Transform.scale(
-          scale: 0.95 + (0.05 * _animationController.value),
-          child: Opacity(opacity: _animationController.value, child: child),
         );
       },
       child: child,

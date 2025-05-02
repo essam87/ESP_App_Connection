@@ -25,7 +25,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
   String? _currentSsid;
   bool _isLoadingNetworkInfo = true;
   bool _locationPermissionGranted = false;
-  final TextEditingController _ipController = TextEditingController();
   final TextEditingController _ssidController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   // Focus nodes for text fields
@@ -40,7 +39,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
 
   // Connection check states
   bool _credentialsSubmitted = false;
-  bool _isCheckingConnection = false;
   String? _connectionStatus;
   bool _isRedirecting = false;
   int _redirectStep = 0;
@@ -82,7 +80,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
     _redirectTimer?.cancel();
     _connectivitySubscription?.cancel();
     _animationController.dispose();
-    _ipController.dispose();
     _ssidController.dispose();
     _passwordController.dispose();
     _ssidFocusNode.dispose();
@@ -208,7 +205,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
     if (!mounted) return;
 
     setState(() {
-      _isCheckingConnection = true;
       _connectionStatus = null;
       _showInitialInstructions = false;
     });
@@ -224,7 +220,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
       if (mounted) {
         setState(() {
           _connectionStatus = 'no_wifi';
-          _isCheckingConnection = false;
         });
       }
       return;
@@ -238,7 +233,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
       if (mounted) {
         setState(() {
           _connectionStatus = 'still_in_config';
-          _isCheckingConnection = false;
         });
       }
       return;
@@ -252,14 +246,12 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
       if (mounted) {
         setState(() {
           _connectionStatus = 'success';
-          _isCheckingConnection = false;
         });
 
         // Wait 2 seconds to show success
-        await Future.delayed(const Duration(seconds: 2));
-
-        // Start redirect sequence
-        _startRedirectSequence();
+        Future.delayed(const Duration(seconds: 2), () {
+          _startRedirectSequence();
+        });
       }
       return;
     }
@@ -281,14 +273,12 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
           if (mounted) {
             setState(() {
               _connectionStatus = 'success';
-              _isCheckingConnection = false;
             });
 
             // Wait 2 seconds to show success
-            await Future.delayed(const Duration(seconds: 2));
-
-            // Start redirect sequence
-            _startRedirectSequence();
+            Future.delayed(const Duration(seconds: 2), () {
+              _startRedirectSequence();
+            });
           }
           return;
         }
@@ -303,7 +293,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
       if (mounted) {
         setState(() {
           _connectionStatus = 'esp_not_found';
-          _isCheckingConnection = false;
         });
       }
     } catch (e) {
@@ -313,7 +302,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
       if (mounted) {
         setState(() {
           _connectionStatus = 'error';
-          _isCheckingConnection = false;
         });
       }
     }
@@ -417,7 +405,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
       WidgetsBinding.instance.addPostFrameCallback((_) {
         setState(() {
           _connectionStatus = 'success';
-          _isCheckingConnection = false;
         });
 
         // Give a moment to show success state, then redirect
@@ -628,6 +615,15 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
                                 textAlign: TextAlign.center,
                               ),
                               const SizedBox(height: 32),
+                              // Add check connection button
+                              _buildAnimatedButton(
+                                onPressed: () => _checkConnection(),
+                                icon: const Icon(Icons.refresh),
+                                label: const Text('Check Connection'),
+                                backgroundColor: Colors.blue,
+                                foregroundColor: Colors.white,
+                                isFullWidth: true,
+                              ),
                             ],
                           )
                         else if (_currentSsid == "Not connected to WiFi")
@@ -648,6 +644,16 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
                                 style: const TextStyle(fontSize: 16),
                                 textAlign: TextAlign.center,
                               ),
+                              const SizedBox(height: 32),
+                              // Add check connection button
+                              _buildAnimatedButton(
+                                onPressed: () => _checkConnection(),
+                                icon: const Icon(Icons.refresh),
+                                label: const Text('Check Connection'),
+                                backgroundColor: Colors.blue,
+                                foregroundColor: Colors.white,
+                                isFullWidth: true,
+                              ),
                             ],
                           )
                         else
@@ -667,6 +673,16 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
                                 'Please connect to "$_clexaConnectedSsid" WiFi network that Clexa is using.',
                                 style: const TextStyle(fontSize: 16),
                                 textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 32),
+                              // Add check connection button
+                              _buildAnimatedButton(
+                                onPressed: () => _checkConnection(),
+                                icon: const Icon(Icons.refresh),
+                                label: const Text('Check Connection'),
+                                backgroundColor: Colors.blue,
+                                foregroundColor: Colors.white,
+                                isFullWidth: true,
                               ),
                             ],
                           ),
@@ -969,168 +985,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  // Build connection status indicator
-  Widget _buildConnectionStatusIndicator() {
-    if (_isRedirecting) {
-      return Column(
-        children: [
-          const CircularProgressIndicator(
-            valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Redirecting to Data Page...',
-            style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold),
-          ),
-        ],
-      );
-    } else if (_isCheckingConnection) {
-      return const Column(
-        children: [
-          CircularProgressIndicator(),
-          SizedBox(height: 8),
-          Text(
-            'Checking connection status...',
-            style: TextStyle(fontStyle: FontStyle.italic),
-          ),
-        ],
-      );
-    } else if (_connectionStatus == 'success') {
-      return Column(
-        children: [
-          const CircularProgressIndicator(
-            valueColor: AlwaysStoppedAnimation<Color>(Colors.green),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Success! Clexa device detected on your network!',
-            style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold),
-          ),
-        ],
-      );
-    } else if (_connectionStatus != null) {
-      return Column(
-        children: [
-          const CircularProgressIndicator(
-            valueColor: AlwaysStoppedAnimation<Color>(Colors.orange),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            _getConnectionStatusText(),
-            style: const TextStyle(color: Colors.orange),
-          ),
-        ],
-      );
-    } else {
-      // Default state - no loading indicator, just a message
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 16.0),
-        child: Text(
-          'Please click "Check Connection" when you\'re ready',
-          style: TextStyle(fontStyle: FontStyle.italic),
-        ),
-      );
-    }
-  }
-
-  // Get connection status text
-  String _getConnectionStatusText() {
-    switch (_connectionStatus) {
-      case 'no_wifi':
-        return 'Not connected to any WiFi network';
-      case 'still_in_config':
-        return 'Still connected to Clexa-Config network';
-      case 'esp_not_found':
-        return 'Connected to WiFi but Clexa not found';
-      case 'error':
-        return 'Error checking connection';
-      default:
-        return 'Connection issue detected';
-    }
-  }
-
-  // Build connection guidance
-  Widget _buildConnectionGuidance() {
-    String guidance;
-
-    switch (_connectionStatus) {
-      case 'no_wifi':
-        guidance =
-            '• Make sure your WiFi is enabled\n'
-            '• Connect to a WiFi network\n'
-            '• Try toggling your WiFi off and on';
-        break;
-      case 'still_in_config':
-        guidance =
-            '• Wait a few more moments for Clexa to restart\n'
-            '• Connect to your WiFi network\n'
-            '• Try clicking the Check Connection button again';
-        break;
-      case 'esp_not_found':
-        guidance =
-            '• Make sure Clexa is powered on\n'
-            '• Wait a few more moments for Clexa to fully start\n'
-            '• Try clicking the Check Connection button again';
-        break;
-      default:
-        guidance =
-            '• Please check your network settings\n'
-            '• Ensure Clexa is powered on\n'
-            '• Try clicking the Check Connection button again';
-    }
-
-    // Convert the guidance string to rich text with bold formatting for "Check Connection"
-    final List<InlineSpan> textSpans = [];
-
-    // Process each line
-    final lines = guidance.split('\n');
-    for (int i = 0; i < lines.length; i++) {
-      final line = lines[i];
-
-      // Check if the line contains our target text
-      if (line.contains('Check Connection')) {
-        // Split the line at "Check Connection"
-        final parts = line.split('Check Connection');
-
-        textSpans.add(TextSpan(text: parts[0]));
-        textSpans.add(
-          const TextSpan(
-            text: 'Check Connection',
-            style: TextStyle(fontWeight: FontWeight.bold),
-          ),
-        );
-        textSpans.add(TextSpan(text: parts[1]));
-      } else {
-        textSpans.add(TextSpan(text: line));
-      }
-
-      // Add a newline if not the last line
-      if (i < lines.length - 1) {
-        textSpans.add(const TextSpan(text: '\n'));
-      }
-    }
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Troubleshooting:',
-            style: TextStyle(fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          RichText(
-            text: TextSpan(
-              style: const TextStyle(color: Colors.black, fontSize: 16),
-              children: textSpans,
-            ),
-          ),
-        ],
       ),
     );
   }

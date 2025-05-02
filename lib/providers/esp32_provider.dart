@@ -324,17 +324,31 @@ class Esp32Provider with flutter.ChangeNotifier {
     }
   }
 
-  // Disconnect from Clexa WebSocket
+  // Improved asynchronous WebSocket disconnection
   void disconnectWebSocket() {
     if (flutter.kDebugMode) {
       flutter.debugPrint('Provider: disconnectWebSocket called.');
     }
-    _webSocketSubscription?.cancel();
-    _webSocketSubscription = null;
-    _esp32Service.disconnectWebSocket();
-    if (_state.isConnectedToEsp || _state.errorMessage == 'Connecting...') {
-      _updateState(isConnectedToEsp: false, errorMessage: () => null);
-    }
+
+    // Cancel the subscription asynchronously to prevent UI blocking
+    Future.microtask(() {
+      if (_webSocketSubscription != null) {
+        _webSocketSubscription!.cancel().catchError((e) {
+          if (flutter.kDebugMode) {
+            flutter.debugPrint('Error canceling WebSocket subscription: $e');
+          }
+        });
+        _webSocketSubscription = null;
+      }
+
+      // Disconnect the WebSocket service
+      _esp32Service.disconnectWebSocket();
+
+      // Update the state
+      if (_state.isConnectedToEsp || _state.errorMessage == 'Connecting...') {
+        _updateState(isConnectedToEsp: false, errorMessage: () => null);
+      }
+    });
   }
 
   // Manually set Clexa IP address
@@ -349,49 +363,59 @@ class Esp32Provider with flutter.ChangeNotifier {
     );
   }
 
-  // Simplified clear credentials command
+  // Improved asynchronous clear credentials command
   void sendClearCredentialsCommand() {
-    try {
-      if (!_state.isConnectedToEsp) {
-        if (flutter.kDebugMode) {
-          flutter.debugPrint("Cannot clear credentials: Not connected.");
+    // First, immediately update the UI to show feedback
+    _updateState(errorMessage: () => 'Sending clear credentials command...');
+
+    // Use microtask to move operations off the UI thread
+    Future.microtask(() async {
+      try {
+        if (!_state.isConnectedToEsp) {
+          if (flutter.kDebugMode) {
+            flutter.debugPrint("Cannot clear credentials: Not connected.");
+          }
+          _updateState(
+            errorMessage: () => 'Connect to Clexa first to clear credentials',
+          );
+          return;
         }
+
+        if (flutter.kDebugMode) {
+          flutter.debugPrint("Provider: Sending clearCredentials command.");
+        }
+
+        // 1. Send the command to Clexa
+        _esp32Service.sendCommand({"action": "clearCredentials"});
+
+        // Give the ESP a moment to process the command before disconnecting
+        await Future.delayed(const Duration(milliseconds: 300));
+
+        if (flutter.kDebugMode) {
+          flutter.debugPrint(
+            "Provider: Command sent successfully, now disconnecting.",
+          );
+        }
+
+        // 2. Update state before disconnecting WebSocket
         _updateState(
-          errorMessage: () => 'Connect to Clexa first to clear credentials',
+          isConnectedToEsp: false,
+          espIpAddress: () => null,
+          espWebSocketUrl: () => null,
+          errorMessage: () => 'Sent clear command to Clexa...',
         );
-        return;
+
+        // 3. Cleanup WebSocket after a slight delay
+        disconnectWebSocket();
+      } catch (e) {
+        if (flutter.kDebugMode) {
+          flutter.debugPrint(
+            "Provider: Error in sendClearCredentialsCommand: $e",
+          );
+        }
+        _updateState(errorMessage: () => 'Error: $e');
       }
-
-      if (flutter.kDebugMode) {
-        flutter.debugPrint("Provider: Sending clearCredentials command.");
-      }
-
-      // 1. Send the command to Clexa
-      _esp32Service.sendCommand({"action": "clearCredentials"});
-
-      if (flutter.kDebugMode) {
-        flutter.debugPrint("Provider: Command sent successfully.");
-      }
-
-      // 2. Cleanup WebSocket immediately (don't wait for ESP32 restart)
-      disconnectWebSocket();
-
-      // 3. Update state minimally - DO NOT set isProvisioningNeeded here
-      _updateState(
-        isConnectedToEsp: false,
-        espIpAddress: () => null, // Clear invalid info
-        espWebSocketUrl: () => null,
-        errorMessage:
-            () => 'Sent clear command to Clexa...', // Indicate command sent
-      );
-    } catch (e) {
-      if (flutter.kDebugMode) {
-        flutter.debugPrint(
-          "Provider: Error in sendClearCredentialsCommand: $e",
-        );
-      }
-      _updateState(errorMessage: () => 'Error: $e');
-    }
+    });
   }
 
   // Send start command to ESP32

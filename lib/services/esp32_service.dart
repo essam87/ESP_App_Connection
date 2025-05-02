@@ -210,33 +210,73 @@ class Esp32Service {
     }
   }
 
+  // Improved asynchronous disconnection to prevent UI freezing
   void disconnectWebSocket() {
     if (_isDisconnecting || _channel == null) {
-      return; // Already disconnecting or not connected
+      if (kDebugMode) {
+        debugPrint(
+          'WebSocket disconnect ignored: Already disconnecting or not connected',
+        );
+      }
+      return;
     }
+
     _isDisconnecting = true;
     if (kDebugMode) {
-      debugPrint('Disconnecting WebSocket...');
+      debugPrint('Starting WebSocket disconnection process...');
     }
-    _channel?.sink.close(status.goingAway).catchError((e) {
-      if (kDebugMode) {
-        debugPrint('Error closing WebSocket sink: $e');
+
+    // Use microtask to move WebSocket operations off the UI thread
+    Future.microtask(() {
+      // Capture current channel and controller to avoid null issues if they change
+      final currentChannel = _channel;
+      final currentController = _streamController;
+
+      // Clean up references immediately to prevent multiple close attempts
+      _channel = null;
+      _streamController = null;
+      _isConnecting = false;
+
+      // Safely close the WebSocket channel
+      if (currentChannel != null) {
+        try {
+          // Use normalClosure (1000) instead of goingAway
+          currentChannel.sink.close(status.normalClosure).catchError((e) {
+            if (kDebugMode) {
+              debugPrint('Error during WebSocket close: $e');
+            }
+          });
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('Exception when closing WebSocket: $e');
+          }
+        }
       }
-    });
-    _streamController?.close().catchError((e) {
-      if (kDebugMode) {
-        debugPrint('Error closing WebSocket stream controller: $e');
+
+      // Safely close the stream controller
+      if (currentController != null && !currentController.isClosed) {
+        try {
+          currentController.close().catchError((e) {
+            if (kDebugMode) {
+              debugPrint('Error closing stream controller: $e');
+            }
+          });
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('Exception closing stream controller: $e');
+          }
+        }
       }
+
+      if (kDebugMode) {
+        debugPrint('WebSocket disconnection process completed');
+      }
+
+      // Reset the disconnecting flag after a delay
+      Future.delayed(const Duration(milliseconds: 200), () {
+        _isDisconnecting = false;
+      });
     });
-    _channel = null;
-    _streamController = null;
-    // Reset flags after ensuring resources are potentially closed
-    // May need slight delay or use futures to be certain
-    _isConnecting = false;
-    // Keep _isDisconnecting true until resources are confirmed closed?
-    // For simplicity, reset here. Fine-tune if needed.
-    // Future.delayed(Duration(milliseconds: 100), () => _isDisconnecting = false);
-    _isDisconnecting = false; // Reset for next potential connection
   }
 
   // --- ADDED METHOD ---
