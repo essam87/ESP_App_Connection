@@ -41,6 +41,7 @@ dependencies:
   multicast_dns: ^0.3.3
   provider: ^6.1.5
   connectivity_plus: ^6.1.4
+  wifi_scan: ^0.4.1+2
 
 dev_dependencies:
   flutter_test:

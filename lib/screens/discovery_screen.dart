@@ -11,7 +11,16 @@ import '../providers/esp32_provider.dart';
 enum ConnectionStatus { none, checking, success, noWifi, espNotFound, error }
 
 // Discovery process states
-enum DiscoveryStage { searching, found, redirectingToData, notFound, error }
+enum DiscoveryStage {
+  checkingWifi,
+  connectedToWifi,
+  lookingForClexa,
+  found,
+  foundOnDifferentNetwork,
+  redirectingToData,
+  notFound,
+  error,
+}
 
 class DiscoveryScreen extends StatefulWidget {
   const DiscoveryScreen({super.key});
@@ -23,7 +32,7 @@ class DiscoveryScreen extends StatefulWidget {
 class _DiscoveryScreenState extends State<DiscoveryScreen>
     with SingleTickerProviderStateMixin {
   // Stage tracking
-  DiscoveryStage _currentStage = DiscoveryStage.searching;
+  DiscoveryStage _currentStage = DiscoveryStage.checkingWifi;
   String? _networkName; // To store network name if found
   bool _discoveryComplete = false;
 
@@ -61,41 +70,10 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
     _animationController.forward();
 
     // Set the initial stage
-    _currentStage = DiscoveryStage.searching;
+    _currentStage = DiscoveryStage.checkingWifi;
 
     // Run automatic discovery on startup
     _checkConnection();
-
-    // Setup connectivity listener to monitor WiFi status changes
-    _connectivitySubscription = _connectivity.onConnectivityChanged.listen((
-      result,
-    ) {
-      if (!mounted) return;
-
-      final bool isConnectedToWifi = result.contains(ConnectivityResult.wifi);
-      final bool wasConnectedToWifi =
-          _connectionStatus != ConnectionStatus.noWifi;
-
-      if (kDebugMode) {
-        debugPrint(
-          "Connectivity changed. WiFi connected: $isConnectedToWifi, Previous status: ${_connectionStatus.toString()}",
-        );
-      }
-
-      // Only trigger discovery if there's a change in WiFi status
-      if (isConnectedToWifi != wasConnectedToWifi) {
-        if (kDebugMode) {
-          debugPrint("WiFi status changed. Auto-discovering...");
-        }
-
-        // Add small delay to allow network to stabilize
-        Future.delayed(const Duration(milliseconds: 500), () {
-          if (mounted) {
-            _checkConnection();
-          }
-        });
-      }
-    });
   }
 
   @override
@@ -194,7 +172,7 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
     );
   }
 
-  // Reliable connection check - adapted from provisioning screen
+  // Reliable connection check with improved flow
   Future<void> _checkConnection() async {
     if (!mounted) return;
 
@@ -203,18 +181,23 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
       _discoveryComplete = false;
       _errorMessage = null;
       _connectionStatus = ConnectionStatus.checking;
-      _connectionAttempts = 0; // Reset attempts when we start a new check cycle
     });
-    _animateToStage(DiscoveryStage.searching);
 
-    // STEP 1: Check if user is connected to a WiFi network
+    // Start with checking WiFi
+    _animateToStage(DiscoveryStage.checkingWifi);
+
+    // STAGE 1: Allow 2 seconds for the "Checking WiFi Connection..." UI
+    await Future.delayed(const Duration(seconds: 2));
+    if (!mounted) return;
+
+    // Check if user is connected to a WiFi network
     final connectivityResult = await _connectivity.checkConnectivity();
     final bool isConnectedToWifi = connectivityResult.contains(
       ConnectivityResult.wifi,
     );
 
     if (!isConnectedToWifi) {
-      // Not connected to WiFi
+      // STAGE 1B: Not connected to WiFi
       if (mounted) {
         setState(() {
           _errorMessage = 'Not connected to WiFi';
@@ -230,21 +213,46 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
     // Get current WiFi network name
     await _checkNetworkInfo();
 
-    // Allow at least 2 seconds of visible "searching" state
-    await Future.delayed(const Duration(seconds: 2));
-    if (!mounted) return;
+    // STAGE 1A: Show "Connected to WiFi 'ssid'" for 1 second
+    if (mounted) {
+      setState(() {
+        _networkName = _currentSsid ?? "Unknown Network";
+      });
+      _animateToStage(DiscoveryStage.connectedToWifi);
 
-    // STEP 2: Check for ESP32
+      await Future.delayed(const Duration(seconds: 1));
+      if (!mounted) return;
+    }
+
+    // STAGE 2: Show "Looking for Clexa on the same network..." for 5 seconds
+    _animateToStage(DiscoveryStage.lookingForClexa);
+
+    // Check for ESP32 during these 5 seconds
     final esp32Provider = Provider.of<Esp32Provider>(context, listen: false);
 
     // Check if already connected
     if (esp32Provider.state.isConnectedToEsp) {
+      // STAGE 2A: ESP already connected
       if (mounted) {
+        // Check if connected to same network
+        String? espSsid = esp32Provider.state.connectedSsid;
+
+        if (espSsid != null && espSsid != _currentSsid) {
+          // STAGE 2C: ESP found but on different network
+          if (mounted) {
+            setState(() {
+              _isCheckingConnection = false;
+              _discoveryComplete = true;
+              _networkName = espSsid;
+            });
+            _animateToStage(DiscoveryStage.foundOnDifferentNetwork);
+          }
+          return;
+        }
+
+        // Same network - show success
         setState(() {
-          _networkName =
-              esp32Provider.state.connectedSsid ??
-              _currentSsid ??
-              "Unknown Network";
+          _networkName = espSsid ?? _currentSsid ?? "Unknown Network";
           _isCheckingConnection = false;
           _connectionStatus = ConnectionStatus.success;
         });
@@ -265,20 +273,37 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
         debugPrint("Attempting to discover ESP32...");
       }
 
-      // Try discovery and wait for connection
+      // Try discovery within the 5-second window
       await esp32Provider.discoverEsp32();
 
-      // Wait up to 5 seconds to see if we get connected
-      int attempts = 0;
-      while (attempts < 5) {
+      // Total search time of 5 seconds (including animation)
+      int startTime = DateTime.now().millisecondsSinceEpoch;
+      int remainingTime = 5000; // 5 seconds in milliseconds
+
+      // Wait for the connection or timeout
+      while (remainingTime > 0) {
         if (esp32Provider.state.isConnectedToEsp) {
-          // SUCCESS - connected to ESP
+          // STAGE 2A: SUCCESS - connected to ESP
           if (mounted) {
+            // Check if connected to same network
+            String? espSsid = esp32Provider.state.connectedSsid;
+
+            if (espSsid != null && espSsid != _currentSsid) {
+              // STAGE 2C: ESP found but on different network
+              if (mounted) {
+                setState(() {
+                  _isCheckingConnection = false;
+                  _discoveryComplete = true;
+                  _networkName = espSsid;
+                });
+                _animateToStage(DiscoveryStage.foundOnDifferentNetwork);
+              }
+              return;
+            }
+
+            // Same network - show success
             setState(() {
-              _networkName =
-                  esp32Provider.state.connectedSsid ??
-                  _currentSsid ??
-                  "Unknown Network";
+              _networkName = espSsid ?? _currentSsid ?? "Unknown Network";
               _isCheckingConnection = false;
               _connectionStatus = ConnectionStatus.success;
             });
@@ -293,13 +318,19 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
           return;
         }
 
-        attempts++;
-        if (attempts < 5) {
-          await Future.delayed(const Duration(seconds: 1));
+        // Calculate remaining time
+        int now = DateTime.now().millisecondsSinceEpoch;
+        remainingTime = 5000 - (now - startTime);
+
+        // Wait a bit before checking again
+        if (remainingTime > 0) {
+          await Future.delayed(
+            Duration(milliseconds: remainingTime > 500 ? 500 : remainingTime),
+          );
         }
       }
 
-      // If we get here, we couldn't connect after 5 attempts
+      // STAGE 2B: If we get here, we couldn't find ESP after 5 seconds
       if (mounted) {
         setState(() {
           _isCheckingConnection = false;
@@ -391,57 +422,42 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
 
               const SizedBox(height: 36),
 
-              // WiFi status indicator
-              if (_currentSsid != null &&
-                  _connectionStatus != ConnectionStatus.noWifi)
-                _buildAnimatedContent(
-                  child: Text(
-                    'WiFi Network: $_currentSsid',
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontStyle: FontStyle.italic,
-                    ),
-                  ),
-                  delay: 0.3,
-                ),
-
-              const SizedBox(height: 18),
-
-              // Different buttons based on status
-              if (_connectionStatus == ConnectionStatus.none ||
-                  _isCheckingConnection)
-                // No buttons while checking
-                const SizedBox()
-              else if (_connectionStatus == ConnectionStatus.success ||
-                  _isRedirecting)
-                // No buttons if success or redirecting
-                const SizedBox()
-              else
-                // Different buttons based on connection status
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+              // "Configure Network" button only shown when discovery complete with "not found"
+              if (_currentStage == DiscoveryStage.notFound &&
+                  _discoveryComplete)
+                Column(
                   children: [
-                    // Refresh button
-                    if (!_isCheckingConnection)
-                      _buildAnimatedButton(
-                        onPressed: () => _checkConnection(),
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('Refresh'),
-                        backgroundColor: Colors.blue,
-                        foregroundColor: Colors.white,
+                    _buildAnimatedButton(
+                      icon: const Icon(Icons.wifi),
+                      label: const Text('Configure Clexa Network'),
+                      onPressed: () => _goToProvisioningScreen(),
+                    ),
+                    const SizedBox(height: 12), // Space between buttons
+                    _buildAnimatedButton(
+                      icon:
+                          _isCheckingConnection
+                              ? const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                              : const Icon(Icons.search),
+                      label: Text(
+                        _isCheckingConnection
+                            ? 'Checking Connection...'
+                            : 'Discover Clexa',
                       ),
-                    const SizedBox(width: 16),
-                    // Configure button
-                    if ((!_isCheckingConnection) &&
-                        (_connectionStatus == ConnectionStatus.noWifi ||
-                            _connectionStatus == ConnectionStatus.espNotFound))
-                      _buildAnimatedButton(
-                        onPressed: () => _goToProvisioningScreen(),
-                        icon: const Icon(Icons.settings),
-                        label: const Text('Configure Clexa'),
-                        backgroundColor: Colors.deepPurple,
-                        foregroundColor: Colors.white,
-                      ),
+                      onPressed:
+                          _isCheckingConnection
+                              ? () {}
+                              : () => _checkConnection(),
+                      backgroundColor: Colors.blue,
+                      foregroundColor: Colors.white,
+                      isFullWidth: true,
+                    ),
                   ],
                 ),
             ],
@@ -454,14 +470,62 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
   // Build different content based on the current stage
   Widget _buildStageContent() {
     switch (_currentStage) {
-      case DiscoveryStage.searching:
+      case DiscoveryStage.checkingWifi:
         return Column(
           children: [
             const CircularProgressIndicator(),
             const SizedBox(height: 24),
-            const Text(
-              'Searching for Clexa device...',
-              style: TextStyle(fontSize: 18),
+            Text(
+              'Checking WiFi connection...',
+              style: const TextStyle(fontSize: 18),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        );
+
+      case DiscoveryStage.connectedToWifi:
+        return Column(
+          children: [
+            const Icon(
+              Icons.check_circle_outline,
+              color: Colors.green,
+              size: 64,
+            ),
+            const SizedBox(height: 16),
+            RichText(
+              textAlign: TextAlign.center,
+              text: TextSpan(
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: Colors.black87,
+                  height: 1.5,
+                ),
+                children: [
+                  const TextSpan(
+                    text: "Connected to Wi-Fi!\n",
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.green,
+                      fontSize: 20,
+                    ),
+                  ),
+                  TextSpan(
+                    text: "Network: $_currentSsid",
+                    style: const TextStyle(fontSize: 18),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+
+      case DiscoveryStage.lookingForClexa:
+        return Column(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 24),
+            Text(
+              'Looking for Clexa on the same network...',
+              style: const TextStyle(fontSize: 18),
               textAlign: TextAlign.center,
             ),
           ],
@@ -502,14 +566,85 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
           ],
         );
 
+      case DiscoveryStage.foundOnDifferentNetwork:
+        return Column(
+          children: [
+            const Icon(
+              Icons.warning_amber_outlined,
+              color: Colors.orange,
+              size: 64,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Clexa found on a different network',
+              style: const TextStyle(
+                fontSize: 18,
+                color: Colors.orange,
+                fontWeight: FontWeight.bold,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Your device is on network: $_currentSsid\nClexa is on network: $_networkName',
+              style: const TextStyle(fontSize: 16),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Troubleshooting:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '• Connect your device to the same WiFi network as Clexa\n'
+                    '• Try holding the physical reset button on Clexa for 3 seconds\n'
+                    '• Wait a moment, then try discovering Clexa again',
+                    style: const TextStyle(fontSize: 16),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+            _buildAnimatedButton(
+              icon:
+                  _isCheckingConnection
+                      ? const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                      : const Icon(Icons.search),
+              label: Text(
+                _isCheckingConnection
+                    ? 'Checking Connection...'
+                    : 'Discover Clexa',
+              ),
+              onPressed:
+                  _isCheckingConnection ? () {} : () => _checkConnection(),
+              backgroundColor: Colors.blue,
+              foregroundColor: Colors.white,
+              isFullWidth: true,
+            ),
+          ],
+        );
+
       case DiscoveryStage.redirectingToData:
         return Column(
           children: [
             const CircularProgressIndicator(),
             const SizedBox(height: 24),
-            const Text(
+            Text(
               'Redirecting to Data Page...',
-              style: TextStyle(fontSize: 18),
+              style: const TextStyle(fontSize: 18),
               textAlign: TextAlign.center,
             ),
           ],
@@ -590,18 +725,19 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
       case ConnectionStatus.espNotFound:
         guidance =
             '• Make sure Clexa is powered on\n'
+            '• Try the Configure Clexa Network button to set up WiFi Network\n'
             '• Wait 5-10 seconds for Clexa to fully start\n'
-            '• Try refreshing to discover the device\n'
+            '• If you\'ve already configured Clexa, try discovering it\n'
             '• Make sure your phone and Clexa are on the same WiFi network';
         break;
       default:
         guidance =
             '• Please check your network settings\n'
             '• Ensure Clexa is powered on\n'
-            '• Try clicking the Refresh button';
+            '• Try clicking the Discover Clexa button again';
     }
 
-    // Convert the guidance string to rich text with bold formatting
+    // Convert the guidance string to rich text with bold formatting for "Discover Clexa"
     final List<InlineSpan> textSpans = [];
 
     // Process each line
@@ -609,15 +745,29 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
     for (int i = 0; i < lines.length; i++) {
       final line = lines[i];
 
-      // Check if the line contains "Refresh"
-      if (line.contains('Refresh')) {
-        // Split the line at "Refresh"
-        final parts = line.split('Refresh');
+      // Check if the line contains "Discover Clexa"
+      if (line.contains('Discover Clexa')) {
+        // Split the line at "Discover Clexa"
+        final parts = line.split('Discover Clexa');
 
         textSpans.add(TextSpan(text: parts[0]));
         textSpans.add(
           const TextSpan(
-            text: 'Refresh',
+            text: 'Discover Clexa',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+        );
+        textSpans.add(TextSpan(text: parts[1]));
+      }
+      // Check if the line contains "Configure Clexa Network"
+      else if (line.contains('Configure Clexa Network')) {
+        // Split the line at "Configure Clexa Network"
+        final parts = line.split('Configure Clexa Network');
+
+        textSpans.add(TextSpan(text: parts[0]));
+        textSpans.add(
+          const TextSpan(
+            text: 'Configure Clexa Network',
             style: TextStyle(fontWeight: FontWeight.bold),
           ),
         );
