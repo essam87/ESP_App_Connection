@@ -30,20 +30,33 @@ class Esp32Provider with flutter.ChangeNotifier {
   Future<void> discoverEsp32() async {
     if (_isDiscovering) return;
     _isDiscovering = true;
+
     try {
       Future.microtask(
         () => _updateState(
           isProvisioningNeeded: false,
           isConnectedToEsp: false,
-          errorMessage: null,
+          errorMessage: () => "Searching for Clexa...",
           lastRandomNumber: () => null,
         ),
       );
 
-      // Use compute to move discovery to a separate isolate
-      final ipAddress = await compute(_discoverEsp32Worker, {
-        'timeout': const Duration(seconds: 5),
-      });
+      String? ipAddress;
+
+      // Add try-catch specifically around the discovery operation
+      try {
+        // Use compute to move discovery to a separate isolate
+        ipAddress = await compute(_discoverEsp32Worker, {
+          'timeout': const Duration(seconds: 5),
+        });
+      } catch (discoveryError) {
+        if (flutter.kDebugMode) {
+          flutter.debugPrint(
+            'Error during ESP32 discovery process: $discoveryError',
+          );
+        }
+        ipAddress = null;
+      }
 
       if (ipAddress != null) {
         final webSocketUrl = _esp32Service.constructWebSocketUrl(ipAddress);
@@ -51,6 +64,7 @@ class Esp32Provider with flutter.ChangeNotifier {
           isProvisioningNeeded: false,
           espIpAddress: () => ipAddress,
           espWebSocketUrl: () => webSocketUrl,
+          errorMessage: null,
         );
         await connectToWebSocket();
       } else {
@@ -65,6 +79,9 @@ class Esp32Provider with flutter.ChangeNotifier {
         );
       }
     } catch (e) {
+      if (flutter.kDebugMode) {
+        flutter.debugPrint('Error in discoverEsp32 method: $e');
+      }
       _updateState(
         isConnectedToEsp: false,
         errorMessage: () => 'Discovery error: $e',
@@ -153,6 +170,15 @@ class Esp32Provider with flutter.ChangeNotifier {
                       );
                     }
                     _updateState(batteryStatus: () => batteryStatus);
+                  }
+
+                  // Check for location
+                  if (data.containsKey('location')) {
+                    String location = data['location'];
+                    if (flutter.kDebugMode) {
+                      flutter.debugPrint('Received location: $location');
+                    }
+                    _updateState(location: location);
                   }
                 } else {
                   // Handle additional data from Clexa
@@ -310,6 +336,15 @@ class Esp32Provider with flutter.ChangeNotifier {
           );
         }
         _updateState(batteryStatus: () => batteryStatus);
+      }
+
+      // Check for location
+      if (stateMap.containsKey('location')) {
+        String location = stateMap['location'];
+        if (flutter.kDebugMode) {
+          flutter.debugPrint('Received location in extra data: $location');
+        }
+        _updateState(location: location);
       }
 
       // If this data contains any important field your app should handle,
@@ -500,6 +535,7 @@ class Esp32Provider with flutter.ChangeNotifier {
     flutter.ValueGetter<int?>? batteryStatus,
     DateTime? lastActivityTimestamp,
     DateTime? lastStatusTimestamp,
+    String? location,
   }) {
     final String? newErrorMessage =
         errorMessage != null ? errorMessage() : _state.errorMessage;
@@ -517,7 +553,8 @@ class Esp32Provider with flutter.ChangeNotifier {
         'waterLevel=${waterLevel != null ? waterLevel() : 'unchanged'} '
         'batteryStatus=${batteryStatus != null ? batteryStatus() : 'unchanged'} '
         'lastActivityTimestamp=${lastActivityTimestamp?.toString() ?? 'unchanged'} '
-        'lastStatusTimestamp=${lastStatusTimestamp?.toString() ?? 'unchanged'}',
+        'lastStatusTimestamp=${lastStatusTimestamp?.toString() ?? 'unchanged'} '
+        'location=$location',
       );
     }
 
@@ -534,6 +571,7 @@ class Esp32Provider with flutter.ChangeNotifier {
       batteryStatus: batteryStatus,
       lastActivityTimestamp: lastActivityTimestamp,
       lastStatusTimestamp: lastStatusTimestamp,
+      location: location,
     );
 
     notifyListeners();

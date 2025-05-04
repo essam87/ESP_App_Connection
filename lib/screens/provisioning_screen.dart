@@ -2,9 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:esp_smartconfig/esp_smartconfig.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:network_info_plus/network_info_plus.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'dart:async';
 
 // Provisioning process states
-enum ProvisioningStage { input, provisioning, success, failure }
+enum ProvisioningStage {
+  input,
+  sendingCredentials,
+  credentialsSent,
+  credentialsFailed,
+  connecting,
+  success,
+  failure,
+}
 
 class ProvisioningScreen extends StatefulWidget {
   const ProvisioningScreen({super.key});
@@ -35,10 +45,16 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
 
   // Current stage
   ProvisioningStage _currentStage = ProvisioningStage.input;
+  String? _currentSsid;
 
   // Timing information
   DateTime? _provisioningStartTime;
   String? _provisioningDuration;
+  Timer? _provisioningTimer;
+
+  // Connectivity state
+  bool _isConnectedToWifi = false;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
 
   @override
   void initState() {
@@ -55,6 +71,30 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
     );
 
     _animationController.forward();
+
+    // Initialize connectivity monitoring
+    _checkConnectivity();
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
+      _updateConnectionStatus,
+    );
+  }
+
+  // Check current connectivity status
+  Future<void> _checkConnectivity() async {
+    final connectivityResult = await Connectivity().checkConnectivity();
+    _updateConnectionStatus(connectivityResult);
+  }
+
+  // Update connection status based on connectivity result
+  void _updateConnectionStatus(List<ConnectivityResult> results) {
+    setState(() {
+      _isConnectedToWifi = results.contains(ConnectivityResult.wifi);
+      // Clear error message if now connected to WiFi
+      if (_isConnectedToWifi &&
+          _errorMessage?.contains('WiFi network') == true) {
+        _errorMessage = null;
+      }
+    });
   }
 
   @override
@@ -65,6 +105,8 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
     _ssidFocusNode.dispose();
     _passwordFocusNode.dispose();
     _provisioner?.stop();
+    _connectivitySubscription?.cancel();
+    _provisioningTimer?.cancel();
     super.dispose();
   }
 
@@ -86,8 +128,11 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
       return;
     }
 
+    // Store SSID for displaying in messages
+    _currentSsid = _ssidController.text.trim();
+
     // Clear screen and show provisioning UI
-    _animateToStage(ProvisioningStage.provisioning);
+    _animateToStage(ProvisioningStage.sendingCredentials);
 
     // Start timing
     _provisioningStartTime = DateTime.now();
@@ -130,19 +175,35 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
         }
 
         if (mounted) {
+          // Show credentials sent message for 1 second
+          _animateToStage(ProvisioningStage.credentialsSent);
+
+          // Then show connecting message
+          Future.delayed(const Duration(seconds: 1), () {
+            if (mounted) {
+              _animateToStage(ProvisioningStage.connecting);
+            }
+          });
+
           // Calculate duration
           _provisioningDuration = _calculateDuration();
 
-          setState(() {
-            _isSubmitting = false;
-          });
+          // Show success after a short delay (simulating connection process)
+          Future.delayed(const Duration(seconds: 2), () {
+            if (mounted) {
+              setState(() {
+                _isSubmitting = false;
+              });
 
-          // Show success stage
-          _animateToStage(ProvisioningStage.success);
+              // Show success stage
+              _animateToStage(ProvisioningStage.success);
+            }
+          });
         }
 
         // Stop provisioning process
         _provisioner!.stop();
+        _provisioningTimer?.cancel();
       });
 
       // Start the provisioning process with the correct parameters
@@ -161,9 +222,32 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
 
       _provisioner!.start(request);
 
-      // Wait for 90 seconds max, then show error if no response
+      // Cancel any existing timer
+      _provisioningTimer?.cancel();
+
+      // First, check for credential sending timeout after 90 seconds
+      _provisioningTimer = Timer(const Duration(seconds: 90), () {
+        if (_currentStage == ProvisioningStage.sendingCredentials && mounted) {
+          // If still in sending credentials stage, show failure
+          _provisioner?.stop();
+          _animateToStage(ProvisioningStage.credentialsFailed);
+          setState(() {
+            _isSubmitting = false;
+            _errorMessage = 'Could not send credentials to Clexa';
+          });
+        }
+      });
+
+      // Then, check for full provisioning timeout after 90 seconds total
       Future.delayed(const Duration(seconds: 90), () {
-        if (_currentStage == ProvisioningStage.provisioning && mounted) {
+        // Cancel previous timer if it's still active
+        _provisioningTimer?.cancel();
+
+        // Set new timer for overall process timeout
+        if ((_currentStage == ProvisioningStage.sendingCredentials ||
+                _currentStage == ProvisioningStage.credentialsSent ||
+                _currentStage == ProvisioningStage.connecting) &&
+            mounted) {
           // Calculate duration
           _provisioningDuration = _calculateDuration();
 
@@ -183,7 +267,17 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
 
       if (mounted) {
         setState(() {
-          _errorMessage = 'Error starting provisioning: $e';
+          // Check for the specific FormatException that occurs when not connected to WiFi
+          if (e.toString().contains(
+            'FormatException: Invalid radix-16 number',
+          )) {
+            _errorMessage =
+                'Please connect your phone to a WiFi network before provisioning';
+          } else if (e.toString().contains('Minimum length of password is 8')) {
+            _errorMessage = null;
+          } else {
+            _errorMessage = 'Error starting provisioning: $e';
+          }
           _isSubmitting = false;
         });
         _animateToStage(ProvisioningStage.failure);
@@ -267,7 +361,7 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
 
   // Build animated button
   Widget _buildAnimatedButton({
-    required VoidCallback onPressed,
+    required VoidCallback? onPressed,
     required Widget icon,
     required Widget label,
     Color? backgroundColor,
@@ -303,8 +397,17 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
       case ProvisioningStage.input:
         return _buildInputForm();
 
-      case ProvisioningStage.provisioning:
-        return _buildProvisioningInProgressUI();
+      case ProvisioningStage.sendingCredentials:
+        return _buildSendingCredentialsUI();
+
+      case ProvisioningStage.credentialsSent:
+        return _buildCredentialsSentUI();
+
+      case ProvisioningStage.credentialsFailed:
+        return _buildCredentialsFailedUI();
+
+      case ProvisioningStage.connecting:
+        return _buildConnectingUI();
 
       case ProvisioningStage.success:
         return _buildProvisioningSuccessUI();
@@ -338,27 +441,27 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(color: Colors.blue.shade200),
                 ),
-                child: const Column(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
+                    const Text(
                       'Before you begin:',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
                         color: Colors.blue,
                       ),
                     ),
-                    SizedBox(height: 8),
-                    Text(
+                    const SizedBox(height: 8),
+                    const Text(
                       '1. Make sure Clexa is powered on',
                       style: TextStyle(color: Colors.blue),
                     ),
-                    Text(
+                    const Text(
                       '2. Your phone must be connected to a WiFi network',
                       style: TextStyle(color: Colors.blue),
                     ),
-                    Text(
-                      '3. Enter the WiFi credentials below and start provisioning',
+                    const Text(
+                      '3. Enter the WiFi credentials below and start configuring',
                       style: TextStyle(color: Colors.blue),
                     ),
                   ],
@@ -410,7 +513,10 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
                   ),
                   obscureText: !_showPassword,
                   validator: (value) {
-                    // Password can be empty for open networks
+                    // Password validation for minimum length
+                    if (value == null || value.isEmpty || value.length < 8) {
+                      return 'Password must be at least 8 characters';
+                    }
                     return null;
                   },
                   textInputAction: TextInputAction.done,
@@ -466,9 +572,15 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
                   width: double.infinity,
                   child: _buildAnimatedButton(
                     onPressed:
-                        _isSubmitting ? () {} : () => _startProvisioning(),
+                        (_isSubmitting || !_isConnectedToWifi)
+                            ? null // Disable button if submitting or not connected to WiFi
+                            : () => _startProvisioning(),
                     icon: const Icon(Icons.send),
-                    label: const Text('Start Provisioning'),
+                    label: Text(
+                      _isConnectedToWifi
+                          ? 'Start Provisioning'
+                          : 'Connect to WiFi First',
+                    ),
                     backgroundColor: Colors.blue,
                     foregroundColor: Colors.white,
                     isFullWidth: true,
@@ -482,8 +594,8 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
     );
   }
 
-  // Provisioning in progress UI
-  Widget _buildProvisioningInProgressUI() {
+  // Sending credentials UI
+  Widget _buildSendingCredentialsUI() {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24.0),
@@ -509,7 +621,7 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
             _buildAnimatedContent(
               delay: 0.2,
               child: const Text(
-                'Sending credentials to Clexa...',
+                'Sending credentials...',
                 style: TextStyle(fontSize: 18),
                 textAlign: TextAlign.center,
               ),
@@ -524,6 +636,225 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
                 label: const Text('Cancel'),
                 onPressed: () {
                   _provisioner?.stop();
+                  _provisioningTimer?.cancel();
+                  setState(() {
+                    _isSubmitting = false;
+                  });
+                  _animateToStage(ProvisioningStage.input);
+                },
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Credentials sent UI
+  Widget _buildCredentialsSentUI() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _buildAnimatedContent(
+              child: const Text(
+                'Provisioning Clexa',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 36),
+
+            _buildAnimatedContent(
+              delay: 0.1,
+              child: const CircularProgressIndicator(),
+            ),
+
+            const SizedBox(height: 24),
+
+            _buildAnimatedContent(
+              delay: 0.2,
+              child: const Text(
+                'Credentials sent!',
+                style: TextStyle(fontSize: 18),
+                textAlign: TextAlign.center,
+              ),
+            ),
+
+            const SizedBox(height: 48),
+
+            _buildAnimatedContent(
+              delay: 0.3,
+              child: _buildAnimatedButton(
+                icon: const Icon(Icons.cancel),
+                label: const Text('Cancel'),
+                onPressed: () {
+                  _provisioner?.stop();
+                  _provisioningTimer?.cancel();
+                  setState(() {
+                    _isSubmitting = false;
+                  });
+                  _animateToStage(ProvisioningStage.input);
+                },
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Credentials failed UI
+  Widget _buildCredentialsFailedUI() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _buildAnimatedContent(
+              child: const Text(
+                'Provisioning Clexa',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 36),
+
+            _buildAnimatedContent(
+              delay: 0.1,
+              child: const Icon(Icons.info, color: Colors.red, size: 64),
+            ),
+
+            const SizedBox(height: 24),
+
+            _buildAnimatedContent(
+              delay: 0.2,
+              child: Column(
+                children: [
+                  const Text(
+                    'Credentials not sent!',
+                    style: TextStyle(
+                      fontSize: 18,
+                      color: Colors.red,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  if (_provisioningDuration != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _provisioningDuration!,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey,
+                        fontStyle: FontStyle.italic,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+
+                  // Add troubleshooting section
+                  const SizedBox(height: 24),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.amber.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.amber.shade200),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Troubleshooting Tips:',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.amber,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Ensure Clexa is powered on and the LED is on and not blinking (configuring mode)',
+                          style: TextStyle(color: Colors.amber),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 24),
+
+            _buildAnimatedContent(
+              delay: 0.3,
+              child: _buildAnimatedButton(
+                icon: const Icon(Icons.wifi),
+                label: const Text('Configure Again'),
+                onPressed: () {
+                  _animateToStage(ProvisioningStage.input);
+                },
+                backgroundColor: Colors.blue,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Connecting UI
+  Widget _buildConnectingUI() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _buildAnimatedContent(
+              child: const Text(
+                'Provisioning Clexa',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 36),
+
+            _buildAnimatedContent(
+              delay: 0.1,
+              child: const CircularProgressIndicator(),
+            ),
+
+            const SizedBox(height: 24),
+
+            _buildAnimatedContent(
+              delay: 0.2,
+              child: Text(
+                'Clexa is trying to connect to WiFi: $_currentSsid',
+                style: const TextStyle(fontSize: 18),
+                textAlign: TextAlign.center,
+              ),
+            ),
+
+            const SizedBox(height: 48),
+
+            _buildAnimatedContent(
+              delay: 0.3,
+              child: _buildAnimatedButton(
+                icon: const Icon(Icons.cancel),
+                label: const Text('Cancel'),
+                onPressed: () {
+                  _provisioner?.stop();
+                  _provisioningTimer?.cancel();
                   setState(() {
                     _isSubmitting = false;
                   });
@@ -587,7 +918,7 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
                     ),
                     const TextSpan(
                       text:
-                          "Wait a moment for Clexa to restart before discovering.",
+                          "Wait 5-10 seconds for Clexa to fully restart before discovering.",
                       style: TextStyle(fontSize: 18),
                     ),
                     if (_provisioningDuration != null) ...[
@@ -634,16 +965,16 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
 
     if (_errorMessage?.toLowerCase().contains('timeout') ?? false) {
       troubleshootingTips =
-          '• Make sure Clexa is in provisioning mode\n'
-          '• Ensure Clexa is powered on and the LED is blinking\n'
-          '• Try moving your phone closer to the device\n'
-          '• Check that your phone is connected to a 2.4GHz WiFi network (not 5GHz)';
+          '• Verify your WiFi network name and password\n'
+          '• Ensure your WiFi network is 2.4GHz (not 5GHz)\n'
+          '• Ensure Clexa is powered on and the LED is on and not blinking (configuring mode)\n'
+          '• Try moving your phone closer to Clexa';
     } else {
       troubleshootingTips =
           '• Verify your WiFi network name and password\n'
           '• Ensure your WiFi network is 2.4GHz (not 5GHz)\n'
-          '• Restart the Clexa device and try again\n'
-          '• Make sure your phone has location permissions enabled';
+          '• Ensure Clexa is powered on and the LED is on and not blinking (configuring mode)\n'
+          '• Try moving your phone closer to Clexa';
     }
 
     return Center(

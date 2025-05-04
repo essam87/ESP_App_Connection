@@ -22,6 +22,10 @@ const bool DEBUG = true;                 // Debug flag for verbose logging
 #define SC_TIMEOUT_MS 90000 // SmartConfig credential timeout: 90 seconds
 #define WIFI_TIMEOUT_MS 30000 // Wi-Fi connection timeout: 30 seconds
 
+// Network broadcast configuration
+#define NETWORK_BROADCAST_DURATION 30000 // Broadcast network info for 30 seconds
+const char* INFO_AP_PREFIX = "Clexa-On-"; // Prefix for the broadcast network
+
 // Reset button settings
 #define RESET_BUTTON_PIN 0 
 #define RESET_HOLD_TIME 3000 // Time in ms to hold button to clear NVS (3 seconds)
@@ -61,6 +65,11 @@ MFRC522 rfid(SS_PIN, RST_PIN); // Initialize RFID reader
 bool isWifiConnected = false;
 // Flag to indicate if we're in SmartConfig mode
 bool isSmartConfigActive = false;
+// Flag to track if we're broadcasting network info
+bool isBroadcastingNetworkInfo = false;
+// When to stop broadcasting network info
+unsigned long broadcastStartTime = 0;
+
 unsigned long previousMillis = 0; // For timing the data sending
 String connectedSsid = ""; // Store the SSID we're connected to
 
@@ -70,16 +79,20 @@ bool isRunning = false; // Default to OFF when ESP starts
 // Hardware sensor values
 int waterLevel = 0;
 int batteryStatus = 0;  // Battery status (0-100%)
+String currentLocation = "Unknown"; // Current location of the robot based on RFID tags
 
-// RFID tag ID that marks the end of path
-byte endPathTagID[4] = {0x33, 0x81, 0xFD, 0x2C}; // Replace with your actual tag ID
+// RFID tag IDs that track location
+byte startPathTagID[4] = {0xB4, 0x9E, 0xA1, 0xB4};
+byte firstfloorPathTagID[4] = {0x64, 0xF4, 0x9D, 0xB4};
+byte secondfloorPathTagID[4] = {0xD4, 0xB0, 0xA1, 0xB4};
+byte endPathTagID[4] = {0x84, 0x91, 0x97, 0xB4};
 
 // Variables for timing
 unsigned long statusMillis = 0;
 unsigned long lastWaterLevelCheck = 0;
 unsigned long lastBatteryCheck = 0;
-const long statusInterval = 5000; // 5 second interval for status updates when stopped
-const long sensorCheckInterval = 5000; // 5 second interval for checking sensors
+const long statusInterval = 2000; // 2 second interval for status updates when stopped
+const long sensorCheckInterval = 2000; // 2 second interval for reading sensors
 
 // Variables for reset button
 unsigned long resetButtonPressedTime = 0;
@@ -102,6 +115,7 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
         // Add sensor values to status
         jsonDoc["waterLevel"] = waterLevel;
         jsonDoc["batteryStatus"] = batteryStatus;
+        jsonDoc["location"] = currentLocation;
         
         String jsonString;
         serializeJson(jsonDoc, jsonString);
@@ -320,12 +334,15 @@ bool startSmartConfig() {
   preferences.putString(nvsPassKey, WiFi.psk());
   preferences.end();
   
+  // Store connected SSID
+  connectedSsid = WiFi.SSID();
+  
+  // Start broadcasting network info
+  startNetworkBroadcast();
+  
   // Stop SmartConfig
   WiFi.stopSmartConfig();
   Serial.println("SmartConfig process stopped.");
-  
-  // Store connected SSID
-  connectedSsid = WiFi.SSID();
   
   // Add auto-restart after successful SmartConfig
   ESP.restart();
@@ -379,6 +396,9 @@ bool connectToWifi() {
           Serial.println("mDNS Service Added: _clexa._tcp on Port 80");
       }
       // ----- End mDNS Setup ----- //
+      
+      // Start broadcasting network info for 30 seconds
+      startNetworkBroadcast();
 
       return true;
     } else {
@@ -427,6 +447,57 @@ void clearNvsAndRestart() {
   
   Serial.println("Restarting ESP32...");
   ESP.restart();
+}
+
+// Function to start broadcasting network information via a temporary AP
+void startNetworkBroadcast() {
+  if (!isWifiConnected || connectedSsid.isEmpty()) {
+    Serial.println("Cannot broadcast network info: Not connected to WiFi");
+    return;
+  }
+  
+  // Create the info SSID with the connected network name
+  String infoSSID = String(INFO_AP_PREFIX) + connectedSsid;
+  
+  Serial.println("---------------------------------------");
+  Serial.print("STARTING NETWORK BROADCAST: ");
+  Serial.println(infoSSID);
+  Serial.print("Broadcast will last for ");
+  Serial.print(NETWORK_BROADCAST_DURATION / 1000);
+  Serial.println(" seconds to save battery");
+  Serial.println("---------------------------------------");
+  
+  // Set WiFi mode to WIFI_AP_STA (station + access point simultaneously)
+  WiFi.mode(WIFI_AP_STA);
+  
+  // Start a minimal AP with the info SSID (no password, channel 1, not hidden, max 1 connection)
+  bool success = WiFi.softAP(infoSSID.c_str(), "", 1, 0, 1);
+  
+  if (success) {
+    Serial.println("Network broadcast AP started successfully");
+    isBroadcastingNetworkInfo = true;
+    broadcastStartTime = millis();
+  } else {
+    Serial.println("Failed to start network broadcast AP");
+    isBroadcastingNetworkInfo = false;
+  }
+}
+
+// Function to stop broadcasting network information
+void stopNetworkBroadcast() {
+  if (!isBroadcastingNetworkInfo) {
+    return;
+  }
+  
+  Serial.println("---------------------------------------");
+  Serial.println("STOPPING NETWORK BROADCAST");
+  Serial.println("Broadcast duration reached, shutting down AP to save power");
+  Serial.println("---------------------------------------");
+  
+  WiFi.softAPdisconnect(true);
+  // Keep WiFi.mode as WIFI_STA to maintain main connection
+  WiFi.mode(WIFI_STA);
+  isBroadcastingNetworkInfo = false;
 }
 
 void setup() {
@@ -546,6 +617,7 @@ void sendStatusUpdate() {
   statusDoc["ip"] = WiFi.localIP().toString();
   statusDoc["waterLevel"] = waterLevel;
   statusDoc["batteryStatus"] = batteryStatus;
+  statusDoc["location"] = currentLocation;
   
   // Serialize to string
   String statusString;
@@ -581,49 +653,53 @@ void loop() {
     resetButtonPressed = false;
   }
 
+  // Check if we need to stop the network broadcast
+  if (isBroadcastingNetworkInfo) {
+    unsigned long broadcastElapsed = millis() - broadcastStartTime;
+    
+    // Check if time is up
+    if (broadcastElapsed >= NETWORK_BROADCAST_DURATION) {
+      stopNetworkBroadcast();
+    }
+  }
+
   if (isWifiConnected) {
     // If connected to WiFi, handle WebSockets
     ws.cleanupClients();
 
     // Read sensor values regularly
     unsigned long currentMillis = millis();
-    if (currentMillis - lastWaterLevelCheck >= sensorCheckInterval) {
-      lastWaterLevelCheck = currentMillis;
-      readWaterLevel();
-    }
-    
-    if (currentMillis - lastBatteryCheck >= sensorCheckInterval) {
-      lastBatteryCheck = currentMillis;
-      readBatteryStatus();
-    }
-    
-    // Check for RFID tag only if robot is running
-    if (isRunning) {
-      if (checkRFIDEndTag()) {
-        Serial.println("End tag detected - stopping robot");
-        stopRobot();
-        isRunning = false;
-        
-        // Broadcast status update
-        StaticJsonDocument<200> statusDoc;
-        statusDoc["type"] = "statusUpdate";
-        statusDoc["running"] = false;
-        statusDoc["message"] = "Robot automatically stopped: End tag detected";
-        
-        String statusString;
-        serializeJson(statusDoc, statusString);
-        ws.textAll(statusString);
-      }
-    }
     
     // Send periodic status updates
     if (currentMillis - statusMillis >= statusInterval) {
       statusMillis = currentMillis;
       
+      // Read sensors right before sending status update to ensure fresh data
+      readWaterLevel();
+      readBatteryStatus();
+      
       // Only broadcast if we have clients
       if (ws.count() > 0) {
         sendStatusUpdate();
       }
+    }
+    
+    // Only check for RFID tags when the robot is running
+    if (isRunning && checkRFIDTags()) {
+      Serial.println("End tag detected - stopping robot");
+      stopRobot();
+      isRunning = false;
+      
+      // Broadcast status update
+      StaticJsonDocument<200> statusDoc;
+      statusDoc["type"] = "statusUpdate";
+      statusDoc["running"] = false;
+      statusDoc["message"] = "Robot automatically stopped: End tag detected";
+      statusDoc["location"] = currentLocation;
+      
+      String statusString;
+      serializeJson(statusDoc, statusString);
+      ws.textAll(statusString);
     }
   } else if (!isSmartConfigActive) {
     // If we lost WiFi connection and are not in SmartConfig mode, try to reconnect
@@ -718,33 +794,97 @@ void readBatteryStatus() {
   }
 }
 
-// Check for RFID end tag
-bool checkRFIDEndTag() {
+// Check for RFID tags to update location and detect end tag
+bool checkRFIDTags() {
+  bool isEndTag = false;
+  
   if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
     return false;
   }
 
-  // Compare the read UID byte-by-byte with the endPathTagID
-  bool isEndTag = true;
-  for (byte i = 0; i < rfid.uid.size; i++) { // Use rfid.uid.size for safety
-     if (i >= 4 || rfid.uid.uidByte[i] != endPathTagID[i]) { // Compare only first 4 bytes
-        isEndTag = false;
+  // First check for end tag (highest priority)
+  bool endTagDetected = true;
+  for (byte i = 0; i < rfid.uid.size && i < 4; i++) {
+    if (rfid.uid.uidByte[i] != endPathTagID[i]) {
+      endTagDetected = false;
+      break;
+    }
+  }
+  
+  if (endTagDetected) {
+    if (DEBUG) {
+      Serial.println("End Tag detected - End of Second Floor");
+    }
+    currentLocation = "End of Second Floor";
+    isEndTag = true; // Signal to stop the robot
+  }
+  // Check for second floor tag
+  else {
+    bool secondFloorTagDetected = true;
+    for (byte i = 0; i < rfid.uid.size && i < 4; i++) {
+      if (rfid.uid.uidByte[i] != secondfloorPathTagID[i]) {
+        secondFloorTagDetected = false;
         break;
-     }
+      }
+    }
+    
+    if (secondFloorTagDetected) {
+      if (DEBUG) {
+        Serial.println("Second Floor Tag detected");
+      }
+      currentLocation = "Second Floor";
+    }
+    // Check for first floor tag
+    else {
+      bool firstFloorTagDetected = true;
+      for (byte i = 0; i < rfid.uid.size && i < 4; i++) {
+        if (rfid.uid.uidByte[i] != firstfloorPathTagID[i]) {
+          firstFloorTagDetected = false;
+          break;
+        }
+      }
+      
+      if (firstFloorTagDetected) {
+        if (DEBUG) {
+          Serial.println("First Floor Tag detected");
+        }
+        currentLocation = "First Floor";
+      }
+      // Check for start tag
+      else {
+        bool startTagDetected = true;
+        for (byte i = 0; i < rfid.uid.size && i < 4; i++) {
+          if (rfid.uid.uidByte[i] != startPathTagID[i]) {
+            startTagDetected = false;
+            break;
+          }
+        }
+        
+        if (startTagDetected) {
+          if (DEBUG) {
+            Serial.println("Start Tag detected - Ground Floor");
+          }
+          currentLocation = "Ground Floor";
+        }
+      }
+    }
+  }
+
+  // Print detected card ID for debugging
+  if (DEBUG) {
+    Serial.print("Detected RFID Tag ID: ");
+    for (byte i = 0; i < 4; i++) {
+      Serial.print(rfid.uid.uidByte[i] < 0x10 ? " 0" : " ");
+      Serial.print(rfid.uid.uidByte[i], HEX);
+    }
+    Serial.println();
+    Serial.print("Current Location: ");
+    Serial.println(currentLocation);
   }
 
   // Halt PICC and stop crypto to allow reading another tag
   rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
-
-  if (isEndTag && DEBUG) {
-    Serial.print("Detected End Tag ID: ");
-    for (byte i = 0; i < 4; i++) {
-       Serial.print(endPathTagID[i] < 0x10 ? " 0" : " ");
-       Serial.print(endPathTagID[i], HEX);
-    }
-    Serial.println();
-  }
 
   return isEndTag;
 }

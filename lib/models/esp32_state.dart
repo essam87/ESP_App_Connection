@@ -12,6 +12,7 @@ class Esp32State {
   final bool isRunning;
   final int? waterLevel;
   final int? batteryStatus;
+  final String location; // Location of the robot
   final DateTime
   lastActivityTimestamp; // Timestamp of last data received from ESP32
   final DateTime
@@ -20,7 +21,11 @@ class Esp32State {
   // Use factory constructor for initial state with DateTime.now()
   factory Esp32State.initial() {
     final now = DateTime.now();
-    return Esp32State(lastActivityTimestamp: now, lastStatusTimestamp: now);
+    return Esp32State(
+      lastActivityTimestamp: now,
+      lastStatusTimestamp: now,
+      location: "Unknown",
+    );
   }
 
   const Esp32State({
@@ -34,6 +39,7 @@ class Esp32State {
     this.isRunning = false,
     this.waterLevel,
     this.batteryStatus,
+    required this.location,
     required this.lastActivityTimestamp,
     required this.lastStatusTimestamp,
   });
@@ -49,6 +55,7 @@ class Esp32State {
     bool? isRunning,
     ValueGetter<int?>? waterLevel,
     ValueGetter<int?>? batteryStatus,
+    String? location,
     DateTime? lastActivityTimestamp,
     DateTime? lastStatusTimestamp,
   }) {
@@ -67,6 +74,7 @@ class Esp32State {
       waterLevel: waterLevel != null ? waterLevel() : this.waterLevel,
       batteryStatus:
           batteryStatus != null ? batteryStatus() : this.batteryStatus,
+      location: location ?? this.location,
       lastActivityTimestamp:
           lastActivityTimestamp ?? this.lastActivityTimestamp,
       lastStatusTimestamp: lastStatusTimestamp ?? this.lastStatusTimestamp,
@@ -88,6 +96,7 @@ class Esp32State {
           isRunning == other.isRunning &&
           waterLevel == other.waterLevel &&
           batteryStatus == other.batteryStatus &&
+          location == other.location &&
           lastActivityTimestamp == other.lastActivityTimestamp &&
           lastStatusTimestamp == other.lastStatusTimestamp;
 
@@ -103,6 +112,7 @@ class Esp32State {
       isRunning.hashCode ^
       waterLevel.hashCode ^
       batteryStatus.hashCode ^
+      location.hashCode ^
       lastActivityTimestamp.hashCode ^
       lastStatusTimestamp.hashCode;
 
@@ -113,6 +123,7 @@ class Esp32State {
         'lastRandomNumber: $lastRandomNumber, errorMessage: $errorMessage, '
         'connectedSsid: $connectedSsid, isRunning: $isRunning, '
         'waterLevel: $waterLevel, batteryStatus: $batteryStatus, '
+        'location: $location, '
         'lastActivityTimestamp: $lastActivityTimestamp, '
         'lastStatusTimestamp: $lastStatusTimestamp}';
   }

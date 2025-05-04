@@ -14,7 +14,7 @@ const Duration connectionTimeoutDuration = Duration(seconds: 10);
 
 // How long without status updates to consider Clexa offline
 const Duration statusTimeoutDuration = Duration(
-  seconds: 5,
+  seconds: 7,
 ); // Expecting status updates every ~2.5 seconds
 
 // --- Convert to StatefulWidget ---
@@ -362,6 +362,23 @@ class _DataDisplayScreenState extends State<DataDisplayScreen>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // Location indicator
+                    Row(
+                      children: [
+                        const Icon(Icons.location_on, color: Colors.purple),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Location: ${espState.location}',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 16),
+
                     // Water Level gauge
                     SensorGauge(
                       label: 'Water Level',

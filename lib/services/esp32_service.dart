@@ -19,86 +19,103 @@ class Esp32Service {
     Duration timeout = const Duration(seconds: 5),
   }) async {
     // Note: discovery can take time and might find multiple devices.
-    // This implementation returns the first one found.
-
-    // Use platform-safe MDnsClient initialization
-    final MDnsClient client = MDnsClient(
-      // Android doesn't support reusePort, which is used by default in multicast_dns
-      rawDatagramSocketFactory: (
-        dynamic host,
-        int port, {
-        bool? reuseAddress,
-        bool? reusePort,
-        int? ttl,
-      }) {
-        // On Android, we don't use reusePort parameter
-        if (kDebugMode) {
-          debugPrint('Creating MDnsClient with platform-safe socket options');
-        }
-        return RawDatagramSocket.bind(
-          host,
-          port,
-          reuseAddress: reuseAddress ?? false,
-          ttl: ttl ?? 1,
-        );
-      },
-    );
-
+    MDnsClient? client;
     String? foundIpAddress;
 
     try {
       if (kDebugMode) {
         debugPrint('Starting mDNS discovery for $_mdnsServiceName...');
       }
+
+      // Initialize client with platform-safe options
+      client = MDnsClient(
+        // Android doesn't support reusePort, which is used by default in multicast_dns
+        rawDatagramSocketFactory: (
+          dynamic host,
+          int port, {
+          bool? reuseAddress,
+          bool? reusePort,
+          int? ttl,
+        }) {
+          return RawDatagramSocket.bind(
+            host,
+            port,
+            reuseAddress: reuseAddress ?? false,
+            ttl: ttl ?? 1,
+          );
+        },
+      );
+
+      // Start the client
       await client.start();
 
-      // Lookup the service pointers
-      await for (final PtrResourceRecord ptr in client
-          .lookup<PtrResourceRecord>(
-            ResourceRecordQuery.serverPointer(_mdnsServiceName),
-            timeout: timeout,
-          )) {
-        if (kDebugMode) {
-          debugPrint('Found mDNS Ptr Record: ${ptr.domainName}');
-        }
-        // For each pointer, lookup the service instance details (SRV record)
-        await for (final SrvResourceRecord srv in client
-            .lookup<SrvResourceRecord>(
-              ResourceRecordQuery.service(ptr.domainName),
+      // Use a simple try-catch for the actual lookups
+      try {
+        // Look for service name
+        await for (final PtrResourceRecord ptr in client
+            .lookup<PtrResourceRecord>(
+              ResourceRecordQuery.serverPointer(_mdnsServiceName),
               timeout: timeout,
             )) {
           if (kDebugMode) {
-            debugPrint('Found mDNS Srv Record: ${srv.target}:${srv.port}');
+            debugPrint('Found mDNS Ptr Record: ${ptr.domainName}');
           }
-          // And then lookup the IP address (A record for IPv4)
-          await for (final IPAddressResourceRecord ip in client
-              .lookup<IPAddressResourceRecord>(
-                ResourceRecordQuery.addressIPv4(srv.target),
+
+          // For each pointer, look for SRV records
+          await for (final SrvResourceRecord srv in client
+              .lookup<SrvResourceRecord>(
+                ResourceRecordQuery.service(ptr.domainName),
                 timeout: timeout,
               )) {
             if (kDebugMode) {
-              debugPrint(
-                'Found mDNS A Record: ${ip.address.address} for ${srv.target}',
-              );
+              debugPrint('Found mDNS Srv Record: ${srv.target}:${srv.port}');
             }
-            foundIpAddress = ip.address.address;
-            // Return the first valid IP address found
-            break;
+
+            // For each SRV record, look for IP address
+            await for (final IPAddressResourceRecord ip in client
+                .lookup<IPAddressResourceRecord>(
+                  ResourceRecordQuery.addressIPv4(srv.target),
+                  timeout: timeout,
+                )) {
+              if (kDebugMode) {
+                debugPrint(
+                  'Found mDNS A Record: ${ip.address.address} for ${srv.target}',
+                );
+              }
+
+              // We found an IP address - return it
+              foundIpAddress = ip.address.address;
+              return foundIpAddress; // Exit immediately with the first found address
+            }
           }
-          break;
         }
-        break;
+      } catch (lookupError) {
+        if (kDebugMode) {
+          debugPrint('Error during mDNS lookup operations: $lookupError');
+        }
+        // Don't rethrow, just return null
       }
     } catch (e) {
       if (kDebugMode) {
         debugPrint('Error during mDNS discovery: $e');
       }
+      // Don't rethrow, return null
     } finally {
-      client.stop();
-      if (kDebugMode) {
-        debugPrint('mDNS discovery stopped.');
+      // Always ensure we clean up the client
+      if (client != null) {
+        try {
+          client.stop();
+          if (kDebugMode) {
+            debugPrint('mDNS discovery stopped.');
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('Error stopping mDNS client: $e');
+          }
+        }
       }
     }
+
     if (kDebugMode) {
       debugPrint('mDNS discovery finished. Found IP: $foundIpAddress');
     }
