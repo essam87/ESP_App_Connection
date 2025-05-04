@@ -12,6 +12,7 @@ class Esp32State {
   final bool isRunning;
   final int? waterLevel;
   final int? batteryStatus;
+  final String? location; // Current location of the robot
   final DateTime
   lastActivityTimestamp; // Timestamp of last data received from ESP32
 
@@ -31,6 +32,7 @@ class Esp32State {
     this.isRunning = false,
     this.waterLevel,
     this.batteryStatus,
+    this.location,
     required this.lastActivityTimestamp,
   });
 
@@ -45,6 +47,7 @@ class Esp32State {
     bool? isRunning,
     ValueGetter<int?>? waterLevel,
     ValueGetter<int?>? batteryStatus,
+    ValueGetter<String?>? location,
     DateTime? lastActivityTimestamp,
   }) {
     return Esp32State(
@@ -62,6 +65,7 @@ class Esp32State {
       waterLevel: waterLevel != null ? waterLevel() : this.waterLevel,
       batteryStatus:
           batteryStatus != null ? batteryStatus() : this.batteryStatus,
+      location: location != null ? location() : this.location,
       lastActivityTimestamp:
           lastActivityTimestamp ?? this.lastActivityTimestamp,
     );
@@ -82,6 +86,7 @@ class Esp32State {
           isRunning == other.isRunning &&
           waterLevel == other.waterLevel &&
           batteryStatus == other.batteryStatus &&
+          location == other.location &&
           lastActivityTimestamp == other.lastActivityTimestamp;
 
   @override
@@ -96,6 +101,7 @@ class Esp32State {
       isRunning.hashCode ^
       waterLevel.hashCode ^
       batteryStatus.hashCode ^
+      location.hashCode ^
       lastActivityTimestamp.hashCode;
 
   @override
@@ -105,7 +111,7 @@ class Esp32State {
         'lastRandomNumber: $lastRandomNumber, errorMessage: $errorMessage, '
         'connectedSsid: $connectedSsid, isRunning: $isRunning, '
         'waterLevel: $waterLevel, batteryStatus: $batteryStatus, '
-        'lastActivityTimestamp: $lastActivityTimestamp}';
+        'location: $location, lastActivityTimestamp: $lastActivityTimestamp}';
   }
 
   // Helper method to check if the ESP32 is considered offline

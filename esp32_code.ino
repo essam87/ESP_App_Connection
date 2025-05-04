@@ -7,7 +7,6 @@
 #include <ESPmDNS.h>        // <<< ADDED FOR mDNS
 #include <MFRC522.h>        // For RFID
 #include <SPI.h>            // For RFID
-#include <driver/adc.h>     // For analog sensors
 
 // --- Configuration ---
 const char* softApName = "Clexa-Config";
@@ -18,6 +17,7 @@ const char* nvsPassKey = "password";
 const unsigned long dataInterval = 2000; // Send data every 2 seconds (2000 ms)
 const char* mdnsHostname = "clexa";      // <<< Hostname for mDNS (e.g., clexa.local)
 const bool DEBUG = true;                 // Debug flag for verbose logging
+const unsigned long DISCOVERY_AP_DURATION = 30000; // 30 seconds duration for discovery AP
 // --- End Configuration ---
 
 // --- Hardware Pins Configuration ---
@@ -43,6 +43,7 @@ const bool DEBUG = true;                 // Debug flag for verbose logging
 #define BATTERY_PIN     34  // Battery status monitoring pin
 #define SPRAYER_PIN     25
 #define UV_LED_PIN      14
+#define RESET_BUTTON_PIN 15  // GPIO pin for the reset button (change as needed)
 // --- End Hardware Pins Configuration ---
 
 AsyncWebServer server(80); // Web server for provisioning AND WebSocket (port 80)
@@ -62,15 +63,30 @@ bool isRunning = false; // Default to OFF when ESP starts
 int waterLevel = 0;
 int batteryStatus = 0;  // Battery status (0-100%)
 
-// RFID tag ID that marks the end of path
-byte endPathTagID[4] = {0x33, 0x81, 0xFD, 0x2C}; // Replace with your actual tag ID
+// RFID tag IDs that track location
+byte startPathTagID[4] = {0xB4, 0x9E, 0xA1, 0xB4};
+byte firstfloorPathTagID[4] = {0x64, 0xF4, 0x9D, 0xB4};
+byte secondfloorPathTagID[4] = {0xD4, 0xB0, 0xA1, 0xB4};
+byte endPathTagID[4] = {0x84, 0x91, 0x97, 0xB4};
+
+// Current location of the robot
+String currentLocation = "Unknown"; // Default location
 
 // Variables for timing
 unsigned long statusMillis = 0;
 unsigned long lastWaterLevelCheck = 0;
 unsigned long lastBatteryCheck = 0;
-const long statusInterval = 5000; // 5 second interval for status updates when stopped
-const long sensorCheckInterval = 5000; // 5 second interval for checking sensors
+const long statusInterval = 2000; // 2 second interval for status and sensor updates
+const long sensorCheckInterval = 2000; // Keep these the same value to unify the updates
+
+// Variables for temporary AP mode
+bool isTempApActive = false;
+unsigned long tempApStartTime = 0;
+
+// Variables for reset button
+bool resetButtonPressed = false;
+unsigned long resetButtonPressTime = 0;
+const unsigned long RESET_HOLD_DURATION = 3000; // 3 seconds for reset
 
 // Function to handle WebSocket events
 void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
@@ -89,6 +105,7 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
         // Add sensor values to status
         jsonDoc["waterLevel"] = waterLevel;
         jsonDoc["batteryStatus"] = batteryStatus;
+        jsonDoc["location"] = currentLocation; // Add current location information
         
         String jsonString;
         serializeJson(jsonDoc, jsonString);
@@ -372,6 +389,9 @@ void connectToWifi() {
       }
       // ----- End mDNS Setup ----- //
 
+      // Set up dual-mode with temporary AP for discovery
+      startTemporaryDiscoveryAP(savedSsid);
+
       // Initialize WebSocket server
       ws.onEvent(onEvent);
       server.addHandler(&ws); // Add WebSocket handler to the server
@@ -389,6 +409,120 @@ void connectToWifi() {
   } else {
     Serial.println("No WiFi credentials found in NVS.");
     isWifiConnected = false;
+  }
+}
+
+// Function to start a temporary AP with the naming convention "Clexa-On-{SSID}"
+void startTemporaryDiscoveryAP(String connectedSsid) {
+  // Creating the AP name with the format "Clexa-On-{SSID}"
+  String discoveryApName = "Clexa-On-" + connectedSsid;
+  
+  Serial.print("Setting up temporary discovery AP with name: ");
+  Serial.println(discoveryApName);
+  
+  // Set WiFi to dual mode (STA+AP)
+  WiFi.mode(WIFI_AP_STA);
+  
+  // Start AP with the discovery name (no password for easy discovery)
+  if (WiFi.softAP(discoveryApName.c_str())) {
+    Serial.println("Temporary discovery AP started successfully");
+    Serial.print("AP IP address: ");
+    Serial.println(WiFi.softAPIP());
+    
+    // Set the flags and timer
+    isTempApActive = true;
+    tempApStartTime = millis();
+  } else {
+    Serial.println("Failed to start temporary discovery AP");
+  }
+}
+
+// Function to stop the temporary discovery AP
+void stopTemporaryDiscoveryAP() {
+  if (isTempApActive) {
+    Serial.println("Stopping temporary discovery AP");
+    
+    // Disable AP but keep station mode
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_STA);
+    
+    // Reset the flags
+    isTempApActive = false;
+    Serial.println("Temporary discovery AP stopped, returning to STA mode");
+  }
+}
+
+// Function to clear all credentials and restart
+void clearCredentialsAndRestart() {
+  Serial.println("RESET BUTTON HELD: Clearing credentials...");
+  
+  // Clear credentials from NVS
+  preferences.begin(nvsNamespace, false); // Open NVS in read/write mode
+  bool cleared = preferences.clear(); // Clear the entire namespace
+  preferences.end();
+  
+  if (cleared) {
+    Serial.println("Credentials successfully cleared from NVS.");
+  } else {
+    Serial.println("Failed to clear credentials, trying alternative method.");
+    preferences.begin(nvsNamespace, false);
+    preferences.remove(nvsSsidKey);
+    preferences.remove(nvsPassKey);
+    preferences.end();
+    Serial.println("Attempted manual removal of credentials.");
+  }
+  
+  // Force WiFi into AP mode before restart
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  
+  // Set an explicit flag in a different namespace to force AP mode
+  preferences.begin("system", false);
+  preferences.putBool("force_ap_mode", true);
+  preferences.end();
+  Serial.println("AP mode flag set for next boot.");
+  
+  // Additional delay to ensure settings are saved
+  delay(500);
+  
+  Serial.println("Restarting ESP32...");
+  ESP.restart();
+}
+
+// Function to monitor the reset button state
+void checkResetButton() {
+  // Read the current button state (LOW when pressed since we use INPUT_PULLUP)
+  bool buttonCurrentlyPressed = (digitalRead(RESET_BUTTON_PIN) == LOW);
+  
+  // Button just pressed
+  if (buttonCurrentlyPressed && !resetButtonPressed) {
+    resetButtonPressed = true;
+    resetButtonPressTime = millis();
+    if (DEBUG) {
+      Serial.println("Reset button pressed, starting timer...");
+    }
+  }
+  
+  // Button still being held
+  else if (buttonCurrentlyPressed && resetButtonPressed) {
+    // Check if the button has been held long enough for reset
+    if (millis() - resetButtonPressTime >= RESET_HOLD_DURATION) {
+      if (DEBUG) {
+        Serial.println("Reset button held for 3+ seconds, performing factory reset...");
+      }
+      
+      // Clear all credentials and restart
+      clearCredentialsAndRestart();
+    }
+  }
+  
+  // Button released
+  else if (!buttonCurrentlyPressed && resetButtonPressed) {
+    resetButtonPressed = false;
+    if (DEBUG) {
+      Serial.println("Reset button released before timeout");
+    }
   }
 }
 
@@ -461,50 +595,34 @@ void setup() {
 }
 
 void loop() {
+  // Check reset button
+  checkResetButton();
+  
   if (isWifiConnected) {
+    // Check if we need to stop the temporary AP
+    if (isTempApActive && (millis() - tempApStartTime >= DISCOVERY_AP_DURATION)) {
+      stopTemporaryDiscoveryAP();
+    }
+    
     // If connected to WiFi, handle WebSockets
     ws.cleanupClients();
 
     // Read sensor values regularly
     unsigned long currentMillis = millis();
-    if (currentMillis - lastWaterLevelCheck >= sensorCheckInterval) {
-      lastWaterLevelCheck = currentMillis;
-      readWaterLevel();
-    }
     
-    if (currentMillis - lastBatteryCheck >= sensorCheckInterval) {
-      lastBatteryCheck = currentMillis;
-      readBatteryStatus();
-    }
-    
-    // Check for RFID tag only if robot is running
-    if (isRunning) {
-      if (checkRFIDEndTag()) {
-        Serial.println("End tag detected - stopping robot");
-        stopRobot();
-        isRunning = false;
-        
-        // Broadcast status update
-        StaticJsonDocument<200> statusDoc;
-        statusDoc["type"] = "statusUpdate";
-        statusDoc["running"] = false;
-        statusDoc["message"] = "Robot automatically stopped: End tag detected";
-        
-        String statusString;
-        serializeJson(statusDoc, statusString);
-        ws.textAll(statusString);
-      }
-    }
-    
-    // Send periodic status updates
+    // Unified sensor reading and status update at the same interval
     if (currentMillis - statusMillis >= statusInterval) {
       statusMillis = currentMillis;
       
+      // Read sensor values first
+      readWaterLevel();
+      readBatteryStatus();
+      
       if (DEBUG) {
-        Serial.println("Sending periodic status update");
+        Serial.println("Sending unified status and sensor update");
       }
       
-      // Send status update
+      // Send status update with latest sensor readings
       StaticJsonDocument<300> statusDoc;
       statusDoc["type"] = "status";
       statusDoc["running"] = isRunning;
@@ -512,6 +630,7 @@ void loop() {
       statusDoc["ip"] = WiFi.localIP().toString();
       statusDoc["waterLevel"] = waterLevel;
       statusDoc["batteryStatus"] = batteryStatus;
+      statusDoc["location"] = currentLocation; // Add location info
       
       String statusString;
       serializeJson(statusDoc, statusString);
@@ -523,6 +642,15 @@ void loop() {
       
       ws.textAll(statusString);
     }
+    
+    // Check for RFID tag only if robot is running
+    if (isRunning) {
+      if (checkRFIDLocation()) {
+        // No need to do anything here as the checkRFIDLocation function already handles
+        // stopping the robot when it detects the end tag and sending status updates
+      }
+    }
+    
     // mDNS updates are handled automatically by the ESPmDNS library in the background
   }
   // else {
@@ -562,6 +690,9 @@ void initializeHardware() {
   // Sensor pins
   pinMode(WATER_LEVEL_PIN, INPUT);
   pinMode(BATTERY_PIN, INPUT);
+  
+  // Reset button pin setup
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);  // Using internal pull-up resistor
 
   // Stop all motors
   stopAllMotors();
@@ -604,35 +735,119 @@ void readBatteryStatus() {
   }
 }
 
-// Check for RFID end tag
-bool checkRFIDEndTag() {
+// Check for any RFID tag and update location
+bool checkRFIDLocation() {
   if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
-    return false;
+    return false; // No tag detected
   }
 
-  // Compare the read UID byte-by-byte with the endPathTagID
+  bool tagIdentified = false;
+  String previousLocation = currentLocation;
+  
+  // Compare with start path tag
+  bool isStartTag = true;
+  for (byte i = 0; i < 4; i++) {
+    if (rfid.uid.uidByte[i] != startPathTagID[i]) {
+      isStartTag = false;
+      break;
+    }
+  }
+  
+  // Compare with first floor tag
+  bool isFirstFloorTag = true;
+  for (byte i = 0; i < 4; i++) {
+    if (rfid.uid.uidByte[i] != firstfloorPathTagID[i]) {
+      isFirstFloorTag = false;
+      break;
+    }
+  }
+  
+  // Compare with second floor tag
+  bool isSecondFloorTag = true;
+  for (byte i = 0; i < 4; i++) {
+    if (rfid.uid.uidByte[i] != secondfloorPathTagID[i]) {
+      isSecondFloorTag = false;
+      break;
+    }
+  }
+  
+  // Compare with end path tag
   bool isEndTag = true;
-  for (byte i = 0; i < rfid.uid.size; i++) { // Use rfid.uid.size for safety
-     if (i >= 4 || rfid.uid.uidByte[i] != endPathTagID[i]) { // Compare only first 4 bytes
-        isEndTag = false;
-        break;
-     }
+  for (byte i = 0; i < 4; i++) {
+    if (rfid.uid.uidByte[i] != endPathTagID[i]) {
+      isEndTag = false;
+      break;
+    }
   }
-
+  
+  // Update location based on the tag detected
+  if (isStartTag) {
+    currentLocation = "Ground Floor";
+    tagIdentified = true;
+    if (DEBUG) {
+      Serial.println("Detected Start Tag - Ground Floor");
+    }
+  } else if (isFirstFloorTag) {
+    currentLocation = "First Floor";
+    tagIdentified = true;
+    if (DEBUG) {
+      Serial.println("Detected First Floor Tag");
+    }
+  } else if (isSecondFloorTag) {
+    currentLocation = "Second Floor";
+    tagIdentified = true;
+    if (DEBUG) {
+      Serial.println("Detected Second Floor Tag");
+    }
+  } else if (isEndTag) {
+    currentLocation = "End of Second Floor";
+    tagIdentified = true;
+    if (DEBUG) {
+      Serial.println("Detected End Tag - End of Second Floor");
+    }
+    
+    // If we detect the end tag and the robot is running, stop it
+    if (isRunning) {
+      isRunning = false;
+      stopRobot();
+      
+      // Send status update for robot stopped by end tag
+      StaticJsonDocument<300> statusDoc;
+      statusDoc["type"] = "statusUpdate";
+      statusDoc["running"] = false;
+      statusDoc["location"] = currentLocation;
+      statusDoc["message"] = "Robot automatically stopped: End of path reached";
+      
+      String statusString;
+      serializeJson(statusDoc, statusString);
+      ws.textAll(statusString);
+    }
+  }
+  
   // Halt PICC and stop crypto to allow reading another tag
   rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
-
-  if (isEndTag && DEBUG) {
-    Serial.print("Detected End Tag ID: ");
-    for (byte i = 0; i < 4; i++) {
-       Serial.print(endPathTagID[i] < 0x10 ? " 0" : " ");
-       Serial.print(endPathTagID[i], HEX);
+  
+  // If location changed, broadcast an update
+  if (tagIdentified && previousLocation != currentLocation) {
+    // Only send an update if we actually changed location
+    StaticJsonDocument<300> statusDoc;
+    statusDoc["type"] = "statusUpdate";
+    statusDoc["location"] = currentLocation;
+    
+    String statusString;
+    serializeJson(statusDoc, statusString);
+    
+    if (DEBUG) {
+      Serial.print("Location update: ");
+      Serial.println(statusString);
     }
-    Serial.println();
+    
+    ws.textAll(statusString);
+    return true;
   }
-
-  return isEndTag;
+  
+  return tagIdentified;
 }
 
 // Start robot hardware

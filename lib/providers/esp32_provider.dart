@@ -150,6 +150,15 @@ class Esp32Provider with flutter.ChangeNotifier {
                     }
                     _updateState(batteryStatus: () => batteryStatus);
                   }
+
+                  // Check for location information
+                  if (data.containsKey('location')) {
+                    String location = data['location'];
+                    if (flutter.kDebugMode) {
+                      flutter.debugPrint('Received location: $location');
+                    }
+                    _updateState(location: () => location);
+                  }
                 } else {
                   // Handle additional data from Clexa
                   _handleEsp32Data(data);
@@ -495,6 +504,7 @@ class Esp32Provider with flutter.ChangeNotifier {
     flutter.ValueGetter<int?>? waterLevel,
     flutter.ValueGetter<int?>? batteryStatus,
     DateTime? lastActivityTimestamp,
+    flutter.ValueGetter<String?>? location,
   }) {
     final String? newErrorMessage =
         errorMessage != null ? errorMessage() : _state.errorMessage;
@@ -511,7 +521,8 @@ class Esp32Provider with flutter.ChangeNotifier {
         'isRunning=$isRunning '
         'waterLevel=${waterLevel != null ? waterLevel() : 'unchanged'} '
         'batteryStatus=${batteryStatus != null ? batteryStatus() : 'unchanged'} '
-        'lastActivityTimestamp=${lastActivityTimestamp?.toString() ?? 'unchanged'}',
+        'lastActivityTimestamp=${lastActivityTimestamp?.toString() ?? 'unchanged'} '
+        'location=${location != null ? location() : 'unchanged'}',
       );
     }
 
@@ -527,6 +538,7 @@ class Esp32Provider with flutter.ChangeNotifier {
       waterLevel: waterLevel,
       batteryStatus: batteryStatus,
       lastActivityTimestamp: lastActivityTimestamp,
+      location: location,
     );
 
     notifyListeners();

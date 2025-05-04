@@ -40,9 +40,7 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
   // Connection check states
   bool _credentialsSubmitted = false;
   String? _connectionStatus;
-  bool _isRedirecting = false;
-  int _redirectStep = 0;
-  bool _showInitialInstructions = true;
+  final bool _isRedirecting = false;
 
   // Track Clexa's connected SSID
   String? _clexaConnectedSsid;
@@ -187,7 +185,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
         _credentialsSubmitted = true;
         _showConfigForm = false;
         _connectionStatus = null;
-        _showInitialInstructions = false; // Don't show instructions now
         _clexaConnectedSsid =
             _ssidController.text; // Set the SSID that Clexa will connect to
       });
@@ -206,7 +203,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
 
     setState(() {
       _connectionStatus = null;
-      _showInitialInstructions = false;
     });
 
     // STEP 1: Check if user is connected to a WiFi network
@@ -310,11 +306,6 @@ class _ProvisioningScreenState extends State<ProvisioningScreen>
   // Start redirect sequence
   void _startRedirectSequence() {
     if (!mounted) return;
-
-    setState(() {
-      _isRedirecting = true;
-      _redirectStep = 1; // Start with "Redirecting to Data Page..."
-    });
 
     // Wait 2 seconds, then redirect
     _redirectTimer = Timer(const Duration(seconds: 2), () {

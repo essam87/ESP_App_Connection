@@ -8,7 +8,7 @@ import '../providers/esp32_provider.dart';
 import '../main.dart' show navigateTo;
 
 // How long without activity before considering the ESP32 offline
-const Duration connectionTimeoutDuration = Duration(seconds: 10);
+const Duration connectionTimeoutDuration = Duration(seconds: 7);
 
 // --- Convert to StatefulWidget ---
 class DataDisplayScreen extends StatefulWidget {
@@ -240,6 +240,28 @@ class _DataDisplayScreenState extends State<DataDisplayScreen>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // Location display
+                    if (espState.location != null) ...[
+                      Row(
+                        children: [
+                          const Icon(Icons.location_on, color: Colors.purple),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Location: ${espState.location}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      const Divider(),
+                      const SizedBox(height: 12),
+                    ],
+
                     // Water Level gauge
                     SensorGauge(
                       label: 'Water Level',
