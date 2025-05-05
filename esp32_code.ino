@@ -9,6 +9,7 @@
 #include <SPI.h>            // For RFID
 #include <esp_wifi.h>       // Required for ESP SmartConfig
 #include <rom/rtc.h>        // Required for checking reset reason
+#include <WiFiClientSecure.h>
 
 // --- Configuration ---
 const char* nvsNamespace = "wifi-creds"; // Namespace for storing credentials in NVS
@@ -25,10 +26,11 @@ const bool DEBUG = true;                 // Debug flag for verbose logging
 // Network broadcast configuration
 #define NETWORK_BROADCAST_DURATION 30000 // Broadcast network info for 30 seconds
 const char* INFO_AP_PREFIX = "Clexa-On-"; // Prefix for the broadcast network
-
+/*
 // Reset button settings
 #define RESET_BUTTON_PIN 0 
 #define RESET_HOLD_TIME 3000 // Time in ms to hold button to clear NVS (3 seconds)
+*/
 // --- End Configuration ---
 
 // --- Hardware Pins Configuration ---
@@ -75,6 +77,14 @@ String connectedSsid = ""; // Store the SSID we're connected to
 
 // Flag to track if Clexa components are running 
 bool isRunning = false; // Default to OFF when ESP starts
+// Flag to track if the robot is in reverse mode after detecting end tag
+bool isInReverseMode = false;
+// Variable to track when we started the delay after end tag detection
+unsigned long endTagDetectionTime = 0;
+// Flag to track if we're in the waiting period after end tag detection
+bool isWaitingAfterEndTag = false;
+// Constants for end tag detection
+const unsigned long END_TAG_WAIT_MS = 3000; // Wait 3 seconds after end tag detection
 
 // Hardware sensor values
 int waterLevel = 0;
@@ -94,9 +104,40 @@ unsigned long lastBatteryCheck = 0;
 const long statusInterval = 2000; // 2 second interval for status updates when stopped
 const long sensorCheckInterval = 2000; // 2 second interval for reading sensors
 
+// Variables for WiFi status checking
+unsigned long lastWifiCheck = 0; 
+const long wifiCheckInterval = 1000; // 1 second interval for checking WiFi status
+
 // Variables for reset button
 unsigned long resetButtonPressedTime = 0;
 bool resetButtonPressed = false;
+
+// WiFi event handler to detect disconnections
+void WiFiEventHandler(WiFiEvent_t event) {
+  switch (event) {
+    case SYSTEM_EVENT_STA_DISCONNECTED:
+      Serial.println("WiFi connection lost!");
+      isWifiConnected = false;
+      
+      // Safety stop - if robot is running when WiFi disconnects, stop it immediately
+      if (isRunning || isInReverseMode || isWaitingAfterEndTag) {
+        Serial.println("EMERGENCY STOP triggered by WiFi disconnect event");
+        stopRobot();
+        isRunning = false;
+        isInReverseMode = false;
+        isWaitingAfterEndTag = false;
+      }
+      break;
+    case SYSTEM_EVENT_STA_GOT_IP:
+      Serial.print("WiFi connected! IP address: ");
+      Serial.println(WiFi.localIP());
+      isWifiConnected = true;
+      connectedSsid = WiFi.SSID();
+      break;
+    default:
+      break;
+  }
+}
 
 // Function to handle WebSocket events
 void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
@@ -112,6 +153,16 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
         jsonDoc["ssid"] = connectedSsid;
         jsonDoc["ip"] = WiFi.localIP().toString();
         jsonDoc["running"] = isRunning; // Add running state to initial status message
+        
+        // Add descriptive status field
+        if (isInReverseMode) {
+          jsonDoc["status"] = "Reversing";
+        } else if (isRunning) {
+          jsonDoc["status"] = "Running";
+        } else {
+          jsonDoc["status"] = "Stopped";
+        }
+        
         // Add sensor values to status
         jsonDoc["waterLevel"] = waterLevel;
         jsonDoc["batteryStatus"] = batteryStatus;
@@ -204,6 +255,7 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
             StaticJsonDocument<200> responseDoc;
             responseDoc["type"] = "status";
             responseDoc["running"] = true;
+            responseDoc["status"] = "Running"; // Add the explicit status
             responseDoc["message"] = "Clexa started successfully";
             
             String responseString;
@@ -237,6 +289,7 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
             StaticJsonDocument<200> responseDoc;
             responseDoc["type"] = "status";
             responseDoc["running"] = false;
+            responseDoc["status"] = "Stopped"; // Add the explicit status
             responseDoc["message"] = "Clexa stopped successfully";
             
             String responseString;
@@ -505,12 +558,16 @@ void setup() {
   Serial.println("\nESP32 Booting...");
   delay(500); // Brief delay to ensure serial monitor is ready
 
+  // Register WiFi event handler
+  WiFi.onEvent(WiFiEventHandler);
+  Serial.println("WiFi event handler registered");
+
   // Check if we've had a reset caused by the reset button
   Serial.print("Reset reason: ");
   Serial.println(rtc_get_reset_reason(0)); // Get the reset reason for CPU0
   
   // Setup the reset button pin as input with pullup
-  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+  //pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
   
   // Initialize hardware
   initializeHardware();
@@ -612,7 +669,19 @@ void sendStatusUpdate() {
   // Create status document
   StaticJsonDocument<300> statusDoc;
   statusDoc["type"] = "status";
+  
+  // Include both the original running flag and a more descriptive status
   statusDoc["running"] = isRunning;
+  
+  // Add a more descriptive status string
+  if (isInReverseMode) {
+    statusDoc["status"] = "Reversing";
+  } else if (isRunning) {
+    statusDoc["status"] = "Running";
+  } else {
+    statusDoc["status"] = "Stopped";
+  }
+  
   statusDoc["ssid"] = connectedSsid;
   statusDoc["ip"] = WiFi.localIP().toString();
   statusDoc["waterLevel"] = waterLevel;
@@ -633,6 +702,7 @@ void sendStatusUpdate() {
 }
 
 void loop() {
+  /*
   // Check reset button
   if (digitalRead(RESET_BUTTON_PIN) == LOW) { // Button is pressed (active LOW)
     if (!resetButtonPressed) {
@@ -652,6 +722,7 @@ void loop() {
     // Button not pressed
     resetButtonPressed = false;
   }
+  */
 
   // Check if we need to stop the network broadcast
   if (isBroadcastingNetworkInfo) {
@@ -663,12 +734,40 @@ void loop() {
     }
   }
 
+  // Regularly check WiFi status to catch disconnections quickly
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastWifiCheck >= wifiCheckInterval) {
+    lastWifiCheck = currentMillis;
+    
+    // Update WiFi status flag
+    if (WiFi.status() != WL_CONNECTED && isWifiConnected) {
+      // We just lost connection
+      Serial.println("WiFi connection lost in active check!");
+      isWifiConnected = false;
+      
+      // Safety stop if robot is running
+      if (isRunning || isInReverseMode || isWaitingAfterEndTag) {
+        Serial.println("EMERGENCY STOP triggered by active WiFi check");
+        stopRobot();
+        isRunning = false;
+        isInReverseMode = false;
+        isWaitingAfterEndTag = false;
+      }
+    }
+    else if (WiFi.status() == WL_CONNECTED && !isWifiConnected) {
+      // We just regained connection
+      Serial.println("WiFi connection regained in active check!");
+      isWifiConnected = true;
+      connectedSsid = WiFi.SSID();
+    }
+  }
+
   if (isWifiConnected) {
     // If connected to WiFi, handle WebSockets
     ws.cleanupClients();
 
     // Read sensor values regularly
-    unsigned long currentMillis = millis();
+    // unsigned long currentMillis = millis(); // Removed to avoid redeclaration
     
     // Send periodic status updates
     if (currentMillis - statusMillis >= statusInterval) {
@@ -684,17 +783,70 @@ void loop() {
       }
     }
     
-    // Only check for RFID tags when the robot is running
-    if (isRunning && checkRFIDTags()) {
-      Serial.println("End tag detected - stopping robot");
+    // Handle the waiting period after end tag detection
+    if (isWaitingAfterEndTag) {
+      if (millis() - endTagDetectionTime >= END_TAG_WAIT_MS) {
+        // 3 seconds have passed, start motors in reverse
+        Serial.println("3-second delay after end tag completed, starting reverse mode");
+        isWaitingAfterEndTag = false;
+        isInReverseMode = true;
+        isRunning = true; // Set running to true since the robot is moving
+        
+        // Start motors in reverse but keep UV and spray off
+        startMotorsReverse();
+        
+        // Update status
+        StaticJsonDocument<200> statusDoc;
+        statusDoc["type"] = "statusUpdate";
+        statusDoc["running"] = true; // We're moving again, just in reverse
+        statusDoc["status"] = "Reversing"; // Add the explicit reversal status
+        statusDoc["message"] = "Robot in reverse mode";
+        statusDoc["location"] = currentLocation;
+        
+        String statusString;
+        serializeJson(statusDoc, statusString);
+        ws.textAll(statusString);
+      }
+    }
+    
+    // Always check for RFID tags now, regardless of isRunning status
+    bool endTagDetected = checkRFIDTags();
+    
+    // Process RFID results based on the current state
+    if (isRunning && endTagDetected && !isInReverseMode) {
+      // End tag detected while running forward
+      Serial.println("End tag detected - stopping robot for 3 seconds");
+      stopRobot();
+      
+      // Set flags for the waiting period
+      isWaitingAfterEndTag = true;
+      endTagDetectionTime = millis();
+      
+      // Broadcast status update
+      StaticJsonDocument<200> statusDoc;
+      statusDoc["type"] = "statusUpdate";
+      statusDoc["running"] = false; // Temporarily stopped
+      statusDoc["status"] = "Stopped"; // Add the explicit status
+      statusDoc["message"] = "Robot paused: End tag detected, will reverse in 3 seconds";
+      statusDoc["location"] = currentLocation;
+      
+      String statusString;
+      serializeJson(statusDoc, statusString);
+      ws.textAll(statusString);
+    }
+    else if (isInReverseMode && currentLocation == "Ground Floor") {
+      // Start tag detected while in reverse mode
+      Serial.println("Start tag detected while in reverse - stopping robot completely");
       stopRobot();
       isRunning = false;
+      isInReverseMode = false;
       
       // Broadcast status update
       StaticJsonDocument<200> statusDoc;
       statusDoc["type"] = "statusUpdate";
       statusDoc["running"] = false;
-      statusDoc["message"] = "Robot automatically stopped: End tag detected";
+      statusDoc["status"] = "Stopped"; // Add the explicit status
+      statusDoc["message"] = "Robot automatically stopped: Reached starting point in reverse";
       statusDoc["location"] = currentLocation;
       
       String statusString;
@@ -702,6 +854,20 @@ void loop() {
       ws.textAll(statusString);
     }
   } else if (!isSmartConfigActive) {
+    // Check if robot was running when WiFi disconnected
+    if (isRunning || isInReverseMode || isWaitingAfterEndTag) {
+      Serial.println("WiFi disconnected while robot was running - EMERGENCY STOP");
+      
+      // Stop the robot
+      stopRobot();
+      isRunning = false;
+      isInReverseMode = false;
+      isWaitingAfterEndTag = false;
+      
+      // No need to broadcast status as WiFi is disconnected
+      Serial.println("Robot stopped for safety due to WiFi disconnection");
+    }
+    
     // If we lost WiFi connection and are not in SmartConfig mode, try to reconnect
     Serial.println("WiFi disconnected. Attempting to reconnect...");
     if (!connectToWifi()) {
@@ -893,6 +1059,10 @@ bool checkRFIDTags() {
 void startRobot() {
   Serial.println("Starting robot...");
 
+  // Reset reverse mode flag
+  isInReverseMode = false;
+  isWaitingAfterEndTag = false;
+  
   // Start moving motors forward
   startMotorsForward();
 
@@ -925,6 +1095,23 @@ void startMotorsForward() {
   digitalWrite(MOTOR2_IN2, LOW);
   digitalWrite(MOTOR3_IN1, HIGH);
   digitalWrite(MOTOR3_IN2, LOW);
+
+  // Set speed for all motors (adjust 150 as needed for desired speed)
+  analogWrite(MOTOR1_EN, 150);
+  analogWrite(MOTOR2_EN, 150);
+  analogWrite(MOTOR3_EN, 150);
+}
+
+// Start all motors in reverse direction
+void startMotorsReverse() {
+  Serial.println("Setting motors reverse");
+  // Set direction for all motors (opposite of forward)
+  digitalWrite(MOTOR1_IN1, LOW);
+  digitalWrite(MOTOR1_IN2, HIGH);
+  digitalWrite(MOTOR2_IN1, LOW);
+  digitalWrite(MOTOR2_IN2, HIGH);
+  digitalWrite(MOTOR3_IN1, LOW);
+  digitalWrite(MOTOR3_IN2, HIGH);
 
   // Set speed for all motors (adjust 150 as needed for desired speed)
   analogWrite(MOTOR1_EN, 150);
