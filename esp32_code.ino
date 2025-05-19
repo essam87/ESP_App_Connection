@@ -751,7 +751,7 @@ void loop() {
     }
     else if (isInReverseMode && currentLocation == "Ground Floor") {
       // Start tag detected while in reverse mode
-      Serial.println("Start tag detected while in reverse - stopping robot completely");
+      Serial.println("Start tag detected while in reverse - Sterilization Cycle Completed.");
       stopRobot();
       isRunning = false;
       isInReverseMode = false;
