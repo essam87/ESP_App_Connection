@@ -4,7 +4,6 @@ import 'package:provider/provider.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:network_info_plus/network_info_plus.dart';
-import 'package:wifi_scan/wifi_scan.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../providers/esp32_provider.dart';
@@ -27,7 +26,6 @@ enum DiscoveryStage {
   connectedToWifi,
   lookingForClexa,
   found,
-  foundOnDifferentNetwork,
   redirectingToData,
   notFound,
   error,
@@ -132,59 +130,6 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
         debugPrint('Could not get network info: $e');
       }
       _currentSsid = 'Error reading WiFi';
-    }
-  }
-
-  // Scan for WiFi networks to find the ESP's network
-  Future<String?> _findClexaNetwork() async {
-    try {
-      // Check if WiFi scanning is available
-      final canScan = await WiFiScan.instance.canStartScan();
-      if (canScan != CanStartScan.yes) {
-        if (kDebugMode) {
-          debugPrint('Cannot scan for WiFi networks: $canScan');
-        }
-        return null;
-      }
-
-      // Start the scan
-      final result = await WiFiScan.instance.startScan();
-      if (!result) {
-        if (kDebugMode) {
-          debugPrint('Failed to start WiFi scan');
-        }
-        return null;
-      }
-
-      // Get scan results
-      await Future.delayed(
-        const Duration(seconds: 2),
-      ); // Wait for scan to complete
-      final accessPoints = await WiFiScan.instance.getScannedResults();
-
-      if (kDebugMode) {
-        debugPrint('Found ${accessPoints.length} WiFi networks');
-      }
-
-      // Look for any network starting with "Clexa-On-"
-      for (var ap in accessPoints) {
-        final ssid = ap.ssid;
-        if (ssid.startsWith('Clexa-On-')) {
-          // Extract the network name from "Clexa-On-{NetworkName}"
-          final espNetwork = ssid.substring(9); // "Clexa-On-".length
-          if (kDebugMode) {
-            debugPrint('Found Clexa on network: $espNetwork');
-          }
-          return espNetwork;
-        }
-      }
-
-      return null; // No Clexa broadcast network found
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('Error scanning WiFi networks: $e');
-      }
-      return null;
     }
   }
 
@@ -350,23 +295,6 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
     // Check for ESP32 during these 5 seconds
     final esp32Provider = Provider.of<Esp32Provider>(context, listen: false);
 
-    // First try WiFi scanning to find broadcast information
-    String? espNetworkFromBroadcast = await _findClexaNetwork();
-
-    // If we found a broadcast, and it's on a different network
-    if (espNetworkFromBroadcast != null &&
-        espNetworkFromBroadcast != _currentSsid) {
-      if (mounted) {
-        setState(() {
-          _isCheckingConnection = false;
-          _discoveryComplete = true;
-          _networkName = espNetworkFromBroadcast;
-        });
-        _animateToStage(DiscoveryStage.foundOnDifferentNetwork);
-        return;
-      }
-    }
-
     // Check if already connected
     if (esp32Provider.state.isConnectedToEsp) {
       // STAGE 2A: ESP already connected
@@ -382,7 +310,7 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
               _discoveryComplete = true;
               _networkName = espSsid;
             });
-            _animateToStage(DiscoveryStage.foundOnDifferentNetwork);
+            _animateToStage(DiscoveryStage.found);
           }
           return;
         }
@@ -433,7 +361,7 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
                   _discoveryComplete = true;
                   _networkName = espSsid;
                 });
-                _animateToStage(DiscoveryStage.foundOnDifferentNetwork);
+                _animateToStage(DiscoveryStage.found);
               }
               return;
             }
@@ -561,8 +489,7 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
               if (_connectionStatus != ConnectionStatus.none &&
                   _connectionStatus != ConnectionStatus.success &&
                   !_isRedirecting &&
-                  _discoveryComplete &&
-                  _currentStage != DiscoveryStage.foundOnDifferentNetwork)
+                  _discoveryComplete)
                 _buildAnimatedContent(
                   child: _buildConnectionGuidance(),
                   delay: 0.2,
@@ -701,77 +628,6 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
                   ),
                 ],
               ),
-            ),
-          ],
-        );
-
-      case DiscoveryStage.foundOnDifferentNetwork:
-        return Column(
-          children: [
-            const Icon(
-              Icons.warning_amber_outlined,
-              color: Colors.orange,
-              size: 64,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Clexa found on a different network',
-              style: const TextStyle(
-                fontSize: 18,
-                color: Colors.orange,
-                fontWeight: FontWeight.bold,
-              ),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Your device is on network: $_currentSsid\nClexa is on network: $_networkName',
-              style: const TextStyle(fontSize: 16),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 16),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Troubleshooting:',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    '• Connect your device to the same WiFi network as Clexa\n'
-                    '• Try holding the physical reset button on Clexa for 3 seconds\n'
-                    '• Wait a moment, then try the Discover Clexa button',
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 24),
-            _buildAnimatedButton(
-              icon:
-                  _isCheckingConnection
-                      ? const SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                      : const Icon(Icons.search),
-              label: Text(
-                _isCheckingConnection
-                    ? 'Checking Connection...'
-                    : 'Discover Clexa',
-              ),
-              onPressed:
-                  _isCheckingConnection ? () {} : () => _checkConnection(),
-              backgroundColor: Colors.blue,
-              foregroundColor: Colors.white,
-              isFullWidth: true,
             ),
           ],
         );
