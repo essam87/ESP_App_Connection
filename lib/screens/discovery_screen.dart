@@ -5,15 +5,25 @@ import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:wifi_scan/wifi_scan.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../providers/esp32_provider.dart';
 
 // Connection status types
-enum ConnectionStatus { none, checking, success, noWifi, espNotFound, error }
+enum ConnectionStatus {
+  none,
+  checking,
+  success,
+  noWifi,
+  noLocation,
+  espNotFound,
+  error,
+}
 
 // Discovery process states
 enum DiscoveryStage {
   checkingWifi,
+  checkingLocation,
   connectedToWifi,
   lookingForClexa,
   found,
@@ -272,6 +282,48 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
           _isCheckingConnection = false;
           _discoveryComplete = true;
           _connectionStatus = ConnectionStatus.noWifi;
+        });
+        _animateToStage(DiscoveryStage.notFound);
+      }
+      return;
+    }
+
+    // STAGE 2: Check if location is enabled
+    if (mounted) {
+      _updateStageWithoutAnimation(DiscoveryStage.checkingLocation);
+      await Future.delayed(const Duration(seconds: 1));
+      if (!mounted) return;
+    }
+
+    // Check location permission
+    final locationStatus = await Permission.location.status;
+    if (!locationStatus.isGranted) {
+      // Try to request location permission
+      final result = await Permission.location.request();
+      if (!result.isGranted) {
+        // Still not granted, show error
+        if (mounted) {
+          setState(() {
+            _errorMessage = 'Location permission is required';
+            _isCheckingConnection = false;
+            _discoveryComplete = true;
+            _connectionStatus = ConnectionStatus.noLocation;
+          });
+          _animateToStage(DiscoveryStage.notFound);
+        }
+        return;
+      }
+    }
+
+    // Also check if location service is enabled
+    final serviceStatus = await Permission.location.serviceStatus.isEnabled;
+    if (!serviceStatus) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Location services are disabled';
+          _isCheckingConnection = false;
+          _discoveryComplete = true;
+          _connectionStatus = ConnectionStatus.noLocation;
         });
         _animateToStage(DiscoveryStage.notFound);
       }
@@ -579,6 +631,19 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
           ],
         );
 
+      case DiscoveryStage.checkingLocation:
+        return Column(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 24),
+            Text(
+              'Checking location services...',
+              style: const TextStyle(fontSize: 18),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        );
+
       case DiscoveryStage.connectedToWifi:
         return Column(
           children: [
@@ -749,6 +814,8 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
         // Update icon based on connection status
         if (_connectionStatus == ConnectionStatus.noWifi) {
           iconData = Icons.wifi_off;
+        } else if (_connectionStatus == ConnectionStatus.noLocation) {
+          iconData = Icons.location_off;
         } else if (_connectionStatus == ConnectionStatus.none) {
           // Don't show any error icon for the initial state
           return const SizedBox(); // Return empty widget
@@ -777,6 +844,8 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
     switch (_connectionStatus) {
       case ConnectionStatus.noWifi:
         return 'Not connected to any WiFi network';
+      case ConnectionStatus.noLocation:
+        return 'Location services disabled';
       case ConnectionStatus.espNotFound:
         return 'Clexa not found';
       case ConnectionStatus.error:
@@ -797,6 +866,12 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
         guidance =
             '• Make sure your WiFi is enabled\n'
             '• Connect to a WiFi network';
+        break;
+      case ConnectionStatus.noLocation:
+        guidance =
+            '• Location permission is required for WiFi scanning\n'
+            '• Enable location services in your device settings\n'
+            '• Grant location permission to this app';
         break;
       case ConnectionStatus.espNotFound:
         guidance =

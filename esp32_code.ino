@@ -8,27 +8,21 @@
 #include <MFRC522.h>        // For RFID
 #include <SPI.h>            // For RFID
 #include <esp_wifi.h>       // Required for ESP SmartConfig
-#include <rom/rtc.h>        // Required for checking reset reason
 #include <WiFiClientSecure.h>
 
 // --- Configuration ---
 const char* nvsNamespace = "wifi-creds"; // Namespace for storing credentials in NVS
 const char* nvsSsidKey = "ssid";
 const char* nvsPassKey = "password";
-const unsigned long dataInterval = 2000; // Send data every 2 seconds (2000 ms)
 const char* mdnsHostname = "clexa";      // <<< Hostname for mDNS (e.g., clexa.local)
-const bool DEBUG = true;                 // Debug flag for verbose logging
+const bool DEBUG = true;                  // Debug flag for verbose logging
 
 // SmartConfig timeouts (in milliseconds)
 #define SC_TIMEOUT_MS 90000 // SmartConfig credential timeout: 90 seconds
 #define WIFI_TIMEOUT_MS 30000 // Wi-Fi connection timeout: 30 seconds
-
-// Network broadcast configuration
-#define NETWORK_BROADCAST_DURATION 30000 // Broadcast network info for 30 seconds
-const char* INFO_AP_PREFIX = "Clexa-On-"; // Prefix for the broadcast network
 /*
 // Reset button settings
-#define RESET_BUTTON_PIN 0 
+#define RESET_BUTTON_PIN 12
 #define RESET_HOLD_TIME 3000 // Time in ms to hold button to clear NVS (3 seconds)
 */
 // --- End Configuration ---
@@ -38,23 +32,27 @@ const char* INFO_AP_PREFIX = "Clexa-On-"; // Prefix for the broadcast network
 #define RST_PIN         26
 #define SS_PIN          5
 
-// Motor Driver 1 pins (Motors 1 & 2)
-#define MOTOR1_EN       4
-#define MOTOR1_IN1      16
-#define MOTOR1_IN2      17
-#define MOTOR2_EN       22
-#define MOTOR2_IN1      33
-#define MOTOR2_IN2      32
+// Motor Driver pins (Motors A & B)
+#define MOTORA_EN       4
+#define MOTORA_IN1      16
+#define MOTORA_IN2      17
+#define MOTORB_EN       25
+#define MOTORB_IN1      33
+#define MOTORB_IN2      32
 
-// Motor Driver 2 pins (Motor 3)
-#define MOTOR3_EN       2
-#define MOTOR3_IN1      27
-#define MOTOR3_IN2      13
+// Water level sensor pins if high. (if all of these pins are low, then the water level is 0%)
+#define WATER_LEVEL_1 27 // Water Level = 25%
+#define WATER_LEVEL_2 22 // Water Level = 50%
+#define WATER_LEVEL_3 21 // Water Level = 75%
+#define WATER_LEVEL_4 13 // Water Level = 100%
 
-// Sensor pins
-#define WATER_LEVEL_PIN 35
-#define BATTERY_PIN     34  // Battery status monitoring pin
-#define SPRAYER_PIN     25
+// Battery status monitoring pin
+#define BATTERY_PIN     34 
+
+// Sanitization pin
+#define SPRAYER_PIN     15
+
+// UV LED pin
 #define UV_LED_PIN      14
 // --- End Hardware Pins Configuration ---
 
@@ -67,15 +65,10 @@ MFRC522 rfid(SS_PIN, RST_PIN); // Initialize RFID reader
 bool isWifiConnected = false;
 // Flag to indicate if we're in SmartConfig mode
 bool isSmartConfigActive = false;
-// Flag to track if we're broadcasting network info
-bool isBroadcastingNetworkInfo = false;
-// When to stop broadcasting network info
-unsigned long broadcastStartTime = 0;
 
-unsigned long previousMillis = 0; // For timing the data sending
 String connectedSsid = ""; // Store the SSID we're connected to
 
-// Flag to track if Clexa components are running 
+// Flag to track if Clexa components are running
 bool isRunning = false; // Default to OFF when ESP starts
 // Flag to track if the robot is in reverse mode after detecting end tag
 bool isInReverseMode = false;
@@ -105,7 +98,7 @@ const long statusInterval = 2000; // 2 second interval for status updates when s
 const long sensorCheckInterval = 2000; // 2 second interval for reading sensors
 
 // Variables for WiFi status checking
-unsigned long lastWifiCheck = 0; 
+unsigned long lastWifiCheck = 0;
 const long wifiCheckInterval = 1000; // 1 second interval for checking WiFi status
 
 // Variables for reset button
@@ -147,7 +140,7 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
       Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
       // Send initial status including SSID when client connects
       if (isWifiConnected) {
-        StaticJsonDocument<300> jsonDoc;
+        StaticJsonDocument<200> jsonDoc;
         jsonDoc["type"] = "status";
         jsonDoc["connected"] = true;
         jsonDoc["ssid"] = connectedSsid;
@@ -363,13 +356,6 @@ bool startSmartConfig() {
       WiFi.disconnect(true);
       return false;
     }
-    
-    // Check if SmartConfig is still active
-    if (!WiFi.smartConfigDone() && isSmartConfigActive) {
-      Serial.println("\nSmartConfig process failed during connection attempt.");
-      isSmartConfigActive = false;
-      return false;
-    }
   }
   
   // Connection successful
@@ -389,9 +375,6 @@ bool startSmartConfig() {
   
   // Store connected SSID
   connectedSsid = WiFi.SSID();
-  
-  // Start broadcasting network info
-  startNetworkBroadcast();
   
   // Stop SmartConfig
   WiFi.stopSmartConfig();
@@ -449,9 +432,6 @@ bool connectToWifi() {
           Serial.println("mDNS Service Added: _clexa._tcp on Port 80");
       }
       // ----- End mDNS Setup ----- //
-      
-      // Start broadcasting network info for 30 seconds
-      startNetworkBroadcast();
 
       return true;
     } else {
@@ -502,57 +482,6 @@ void clearNvsAndRestart() {
   ESP.restart();
 }
 
-// Function to start broadcasting network information via a temporary AP
-void startNetworkBroadcast() {
-  if (!isWifiConnected || connectedSsid.isEmpty()) {
-    Serial.println("Cannot broadcast network info: Not connected to WiFi");
-    return;
-  }
-  
-  // Create the info SSID with the connected network name
-  String infoSSID = String(INFO_AP_PREFIX) + connectedSsid;
-  
-  Serial.println("---------------------------------------");
-  Serial.print("STARTING NETWORK BROADCAST: ");
-  Serial.println(infoSSID);
-  Serial.print("Broadcast will last for ");
-  Serial.print(NETWORK_BROADCAST_DURATION / 1000);
-  Serial.println(" seconds to save battery");
-  Serial.println("---------------------------------------");
-  
-  // Set WiFi mode to WIFI_AP_STA (station + access point simultaneously)
-  WiFi.mode(WIFI_AP_STA);
-  
-  // Start a minimal AP with the info SSID (no password, channel 1, not hidden, max 1 connection)
-  bool success = WiFi.softAP(infoSSID.c_str(), "", 1, 0, 1);
-  
-  if (success) {
-    Serial.println("Network broadcast AP started successfully");
-    isBroadcastingNetworkInfo = true;
-    broadcastStartTime = millis();
-  } else {
-    Serial.println("Failed to start network broadcast AP");
-    isBroadcastingNetworkInfo = false;
-  }
-}
-
-// Function to stop broadcasting network information
-void stopNetworkBroadcast() {
-  if (!isBroadcastingNetworkInfo) {
-    return;
-  }
-  
-  Serial.println("---------------------------------------");
-  Serial.println("STOPPING NETWORK BROADCAST");
-  Serial.println("Broadcast duration reached, shutting down AP to save power");
-  Serial.println("---------------------------------------");
-  
-  WiFi.softAPdisconnect(true);
-  // Keep WiFi.mode as WIFI_STA to maintain main connection
-  WiFi.mode(WIFI_STA);
-  isBroadcastingNetworkInfo = false;
-}
-
 void setup() {
   Serial.begin(115200);
   Serial.println("\nESP32 Booting...");
@@ -562,10 +491,6 @@ void setup() {
   WiFi.onEvent(WiFiEventHandler);
   Serial.println("WiFi event handler registered");
 
-  // Check if we've had a reset caused by the reset button
-  Serial.print("Reset reason: ");
-  Serial.println(rtc_get_reset_reason(0)); // Get the reset reason for CPU0
-  
   // Setup the reset button pin as input with pullup
   //pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
   
@@ -605,12 +530,12 @@ void setup() {
   Serial.println("Checking for WiFi credentials...");
   if (!preferences.begin(nvsNamespace, true)) {
     Serial.println("Failed to initialize NVS! Trying read/write mode.");
-     if (!preferences.begin(nvsNamespace, false)) {
-      Serial.println("Failed to initialize NVS even in read/write mode. Halting.");
+      if (!preferences.begin(nvsNamespace, false)) {
+        Serial.println("Failed to initialize NVS even in read/write mode. Halting.");
         while(1) delay(1000);
-     } else {
+      } else {
         preferences.end();
-     }
+      }
   } else {
     // Check if SSID exists as a quick test
     String savedSsid = preferences.getString(nvsSsidKey, "");
@@ -667,7 +592,7 @@ void sendStatusUpdate() {
   }
   
   // Create status document
-  StaticJsonDocument<300> statusDoc;
+  StaticJsonDocument<200> statusDoc;
   statusDoc["type"] = "status";
   
   // Include both the original running flag and a more descriptive status
@@ -723,16 +648,6 @@ void loop() {
     resetButtonPressed = false;
   }
   */
-
-  // Check if we need to stop the network broadcast
-  if (isBroadcastingNetworkInfo) {
-    unsigned long broadcastElapsed = millis() - broadcastStartTime;
-    
-    // Check if time is up
-    if (broadcastElapsed >= NETWORK_BROADCAST_DURATION) {
-      stopNetworkBroadcast();
-    }
-  }
 
   // Regularly check WiFi status to catch disconnections quickly
   unsigned long currentMillis = millis();
@@ -846,7 +761,7 @@ void loop() {
       statusDoc["type"] = "statusUpdate";
       statusDoc["running"] = false;
       statusDoc["status"] = "Stopped"; // Add the explicit status
-      statusDoc["message"] = "Robot automatically stopped: Reached starting point in reverse";
+      statusDoc["message"] = "Sterilization Cycle Completed";
       statusDoc["location"] = currentLocation;
       
       String statusString;
@@ -896,18 +811,12 @@ void initializeHardware() {
   Serial.println("RFID reader initialized");
 
   // Initialize motor control pins
-  pinMode(MOTOR1_EN, OUTPUT);
-  pinMode(MOTOR1_IN1, OUTPUT);
-  pinMode(MOTOR1_IN2, OUTPUT);
-  pinMode(MOTOR2_EN, OUTPUT);
-  pinMode(MOTOR2_IN1, OUTPUT);
-  pinMode(MOTOR2_IN2, OUTPUT);
-  pinMode(MOTOR3_EN, OUTPUT);
-  pinMode(MOTOR3_IN1, OUTPUT);
-  pinMode(MOTOR3_IN2, OUTPUT);
-
-  // Initialize special GPIO2 to LOW before using it
-  digitalWrite(MOTOR3_EN, LOW);
+  pinMode(MOTORA_EN, OUTPUT);
+  pinMode(MOTORA_IN1, OUTPUT);
+  pinMode(MOTORA_IN2, OUTPUT);
+  pinMode(MOTORB_EN, OUTPUT);
+  pinMode(MOTORB_IN1, OUTPUT);
+  pinMode(MOTORB_IN2, OUTPUT);
 
   // Initialize sanitization pins with inverted logic (HIGH = OFF)
   pinMode(SPRAYER_PIN, OUTPUT);
@@ -915,8 +824,13 @@ void initializeHardware() {
   digitalWrite(SPRAYER_PIN, HIGH); // OFF
   digitalWrite(UV_LED_PIN, HIGH);  // OFF
 
-  // Sensor pins
-  pinMode(WATER_LEVEL_PIN, INPUT);
+  // Initialize water level sensor pins
+  pinMode(WATER_LEVEL_1, INPUT);
+  pinMode(WATER_LEVEL_2, INPUT);
+  pinMode(WATER_LEVEL_3, INPUT);
+  pinMode(WATER_LEVEL_4, INPUT);
+  
+  // Battery monitoring pin
   pinMode(BATTERY_PIN, INPUT);
 
   // Stop all motors
@@ -929,26 +843,43 @@ void initializeHardware() {
 
 // Read water level sensor
 void readWaterLevel() {
-  int rawValue = analogRead(WATER_LEVEL_PIN);
-  waterLevel = map(rawValue, 0, 3050, 0, 100); // Adjust 3050 if needed based on calibration
-  // Constrain the value just in case rawValue goes slightly out of expected range
-  waterLevel = constrain(waterLevel, 0, 100);
+  // Check each water level sensor pin
+  bool level1 = digitalRead(WATER_LEVEL_1) == HIGH; // 25%
+  bool level2 = digitalRead(WATER_LEVEL_2) == HIGH; // 50%
+  bool level3 = digitalRead(WATER_LEVEL_3) == HIGH; // 75%
+  bool level4 = digitalRead(WATER_LEVEL_4) == HIGH; // 100%
+  
+  // Determine the highest level that is active
+  if (level4) {
+    waterLevel = 100;
+  } else if (level3) {
+    waterLevel = 75;
+  } else if (level2) {
+    waterLevel = 50;
+  } else if (level1) {
+    waterLevel = 25;
+  } else {
+    waterLevel = 0;
+  }
+  
   if (DEBUG) {
-    Serial.print("Raw ADC (Water Lvl): ");
-    Serial.print(rawValue);
-    Serial.print(" -> Water level: ");
+    Serial.print("Water Level: ");
     Serial.print(waterLevel);
-    Serial.println("%");
+    Serial.print("% -> L1=");
+    Serial.print(level1 ? "HIGH" : "LOW");
+    Serial.print(", L2=");
+    Serial.print(level2 ? "HIGH" : "LOW");
+    Serial.print(", L3=");
+    Serial.print(level3 ? "HIGH" : "LOW");
+    Serial.print(", L4=");
+    Serial.println(level4 ? "HIGH" : "LOW");
   }
 }
 
 // Read battery status
 void readBatteryStatus() {
   int rawValue = analogRead(BATTERY_PIN);
-  // Map raw ADC value (0-4095 for 12-bit ESP32) to 0-100 range
-  // Adjust 3753 if your battery voltage range is different
   batteryStatus = map(rawValue, 0, 3753, 0, 100);
-  // Constrain the value to ensure it's within 0-100
   batteryStatus = constrain(batteryStatus, 0, 100);
 
   if (DEBUG) {
@@ -1088,50 +1019,41 @@ void stopRobot() {
 // Start all motors in forward direction
 void startMotorsForward() {
   Serial.println("Setting motors forward");
-  // Set direction for all motors
-  digitalWrite(MOTOR1_IN1, HIGH);
-  digitalWrite(MOTOR1_IN2, LOW);
-  digitalWrite(MOTOR2_IN1, HIGH);
-  digitalWrite(MOTOR2_IN2, LOW);
-  digitalWrite(MOTOR3_IN1, HIGH);
-  digitalWrite(MOTOR3_IN2, LOW);
+  // Set direction for motors A & B
+  digitalWrite(MOTORA_IN1, HIGH);
+  digitalWrite(MOTORA_IN2, LOW);
+  digitalWrite(MOTORB_IN1, HIGH);
+  digitalWrite(MOTORB_IN2, LOW);
 
-  // Set speed for all motors (adjust 150 as needed for desired speed)
-  analogWrite(MOTOR1_EN, 150);
-  analogWrite(MOTOR2_EN, 150);
-  analogWrite(MOTOR3_EN, 150);
+  // Set speed for motors A & B (adjust 150 as needed for desired speed)
+  analogWrite(MOTORA_EN, 150);
+  analogWrite(MOTORB_EN, 150);
 }
 
 // Start all motors in reverse direction
 void startMotorsReverse() {
   Serial.println("Setting motors reverse");
-  // Set direction for all motors (opposite of forward)
-  digitalWrite(MOTOR1_IN1, LOW);
-  digitalWrite(MOTOR1_IN2, HIGH);
-  digitalWrite(MOTOR2_IN1, LOW);
-  digitalWrite(MOTOR2_IN2, HIGH);
-  digitalWrite(MOTOR3_IN1, LOW);
-  digitalWrite(MOTOR3_IN2, HIGH);
+  // Set direction for motors A & B (opposite of forward)
+  digitalWrite(MOTORA_IN1, LOW);
+  digitalWrite(MOTORA_IN2, HIGH);
+  digitalWrite(MOTORB_IN1, LOW);
+  digitalWrite(MOTORB_IN2, HIGH);
 
-  // Set speed for all motors (adjust 150 as needed for desired speed)
-  analogWrite(MOTOR1_EN, 150);
-  analogWrite(MOTOR2_EN, 150);
-  analogWrite(MOTOR3_EN, 150);
+  // Set speed for motors A & B (adjust 150 as needed for desired speed)
+  analogWrite(MOTORA_EN, 150);
+  analogWrite(MOTORB_EN, 150);
 }
 
 // Stop all motors
 void stopAllMotors() {
   Serial.println("Stopping all motors");
   // Disable motor enable pins (stops power regardless of IN pins)
-  analogWrite(MOTOR1_EN, 0);
-  analogWrite(MOTOR2_EN, 0);
-  analogWrite(MOTOR3_EN, 0);
+  analogWrite(MOTORA_EN, 0);
+  analogWrite(MOTORB_EN, 0);
 
   // Set IN pins to LOW (good practice)
-  digitalWrite(MOTOR1_IN1, LOW);
-  digitalWrite(MOTOR1_IN2, LOW);
-  digitalWrite(MOTOR2_IN1, LOW);
-  digitalWrite(MOTOR2_IN2, LOW);
-  digitalWrite(MOTOR3_IN1, LOW);
-  digitalWrite(MOTOR3_IN2, LOW);
+  digitalWrite(MOTORA_IN1, LOW);
+  digitalWrite(MOTORA_IN2, LOW);
+  digitalWrite(MOTORB_IN1, LOW);
+  digitalWrite(MOTORB_IN2, LOW);
 }
